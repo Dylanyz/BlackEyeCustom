@@ -83,46 +83,125 @@ namespace BlackEyeFastBake
 		}
 	}
 
-	void RunNextTick(TFunction<void()> Action)
+	/** Runs once, after Delay seconds (0 = next tick), outside whatever Slate or Sequencer is doing now. */
+	void RunLater(TFunction<void()> Action, float Delay = 0.f)
 	{
 		FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateLambda([Action = MoveTemp(Action)](float)
 		{
 			Action();
 			return false; // once
-		}));
+		}), Delay);
+	}
+
+	void RunNextTick(TFunction<void()> Action)
+	{
+		RunLater(MoveTemp(Action));
+	}
+
+	// A Sequencer opened this tick isn't ready to be edited: its track editors and tree are set up over the next
+	// frames, and editing its sequence in the same tick crashed (Sequencer asserted while the bake's transaction closed,
+	// after "Unable to find a track editor for track type MovieSceneFloatTrack", 2026-10-06). So any step that follows
+	// opening a sequence waits this long.
+	constexpr float SequencerSettleSeconds = 0.5f;
+
+	/** Opens a sequence as Sequencer's root, then runs Then once that Sequencer has settled. */
+	void OpenThen(ULevelSequence* Sequence, TFunction<void()> Then)
+	{
+		UAssetEditorSubsystem* AssetEditors = GEditor ? GEditor->GetEditorSubsystem<UAssetEditorSubsystem>() : nullptr;
+		if (AssetEditors && Sequence)
+		{
+			AssetEditors->OpenEditorForAsset(Sequence);
+		}
+		RunLater(MoveTemp(Then), SequencerSettleSeconds);
 	}
 
 	/** Re-opens the sequence the user was in and focuses back into the shot, if the bake had to open the shot alone. */
 	void RestoreView(ULevelSequence* Root, ULevelSequence* Shot)
 	{
-		UAssetEditorSubsystem* AssetEditors = GEditor ? GEditor->GetEditorSubsystem<UAssetEditorSubsystem>() : nullptr;
-		if (!Root || !AssetEditors || Root == Shot)
+		if (!Root || Root == Shot)
 		{
 			return;
 		}
-		AssetEditors->OpenEditorForAsset(Root);
-		IAssetEditorInstance* Editor = AssetEditors->FindEditorForAsset(Root, false);
-		TSharedPtr<ISequencer> Sequencer = Editor ? static_cast<ILevelSequenceEditorToolkit*>(Editor)->GetSequencer() : nullptr;
-		if (!Sequencer)
+		const TWeakObjectPtr<ULevelSequence> WeakRoot(Root), WeakShot(Shot);
+		OpenThen(Root, [WeakRoot, WeakShot]()
 		{
-			return;
-		}
-		for (UMovieSceneTrack* Track : Root->GetMovieScene()->GetTracks())
-		{
-			if (UMovieSceneSubTrack* Sub = Cast<UMovieSceneSubTrack>(Track))
+			ULevelSequence* RootSeq = WeakRoot.Get();
+			UAssetEditorSubsystem* AssetEditors = GEditor ? GEditor->GetEditorSubsystem<UAssetEditorSubsystem>() : nullptr;
+			IAssetEditorInstance* Editor = (AssetEditors && RootSeq) ? AssetEditors->FindEditorForAsset(RootSeq, false) : nullptr;
+			TSharedPtr<ISequencer> Sequencer = Editor ? static_cast<ILevelSequenceEditorToolkit*>(Editor)->GetSequencer() : nullptr;
+			if (!Sequencer || Sequencer->GetRootMovieSceneSequence() != RootSeq)
 			{
-				for (UMovieSceneSection* Section : Sub->GetAllSections())
+				return;
+			}
+			for (UMovieSceneTrack* Track : RootSeq->GetMovieScene()->GetTracks())
+			{
+				if (UMovieSceneSubTrack* Sub = Cast<UMovieSceneSubTrack>(Track))
 				{
-					UMovieSceneSubSection* SubSection = Cast<UMovieSceneSubSection>(Section);
-					if (SubSection && SubSection->GetSequence() == Shot)
+					for (UMovieSceneSection* Section : Sub->GetAllSections())
 					{
-						Sequencer->FocusSequenceInstance(*SubSection);
-						return;
+						UMovieSceneSubSection* SubSection = Cast<UMovieSceneSubSection>(Section);
+						if (SubSection && SubSection->GetSequence() == WeakShot.Get())
+						{
+							Sequencer->FocusSequenceInstance(*SubSection);
+							return;
+						}
 					}
 				}
 			}
-		}
+		});
 	}
+
+	/** Bake and lock, as the menu does it: next tick, and with the shot opened on its own first if it's inside an edit. */
+	void StartBake(TWeakObjectPtr<ULevelSequence> WeakSequence, TWeakPtr<ISequencer> WeakSequencer, FString Name)
+	{
+		RunNextTick([WeakSequence, WeakSequencer, Name]()
+		{
+			ULevelSequence* Shot = WeakSequence.Get();
+			const TSharedPtr<ISequencer> Sequencer = WeakSequencer.Pin();
+			const TWeakObjectPtr<ULevelSequence> WeakRoot(Sequencer ? Cast<ULevelSequence>(Sequencer->GetRootMovieSceneSequence()) : nullptr);
+			auto Bake = [WeakSequence, WeakRoot, Name]()
+			{
+				ULevelSequence* BakedShot = WeakSequence.Get();
+				FBlackEyeFastBakeOptions Options;
+				Options.CameraBindingName = Name;
+				const FBlackEyeFastBakeReport Report = UBlackEyeFastBakeLibrary::BakeShot(BakedShot, Options);
+				RestoreView(WeakRoot.Get(), BakedShot);
+			Notify(Report.bSuccess
+				? FText::Format(LOCTEXT("BakeDone", "Baked {0}: {1} frames in {2}s ({3}x realtime){4}"), FText::FromString(Name),
+					Report.NumFrames, FText::AsNumber(FMath::RoundToInt(Report.TotalSeconds)), FText::AsNumber(FMath::RoundToInt(Report.SpeedVsRealtime)),
+					Report.bLocked ? LOCTEXT("AndLocked", ", locked") : FText())
+				: FText::Format(LOCTEXT("BakeFailed", "Fast Bake failed for {0}: {1}"), FText::FromString(Name), FText::FromString(Report.Message)),
+				Report.bSuccess);
+			};
+			// The shot shown inside an edit: open it alone first, and bake once its Sequencer has settled.
+			if (WeakRoot.Get() && WeakRoot.Get() != Shot)
+			{
+				OpenThen(Shot, Bake);
+			}
+			else
+			{
+				Bake();
+			}
+		});
+	}
+
+	/** `BlackEyeCustom.FastBake.Bake <binding>`: the menu's Bake and lock, on the focused sequence of the open Sequencer. */
+	FAutoConsoleCommand GBakeCommand(TEXT("BlackEyeCustom.FastBake.Bake"),
+		TEXT("Bake and lock a Black Eye camera of the focused sequence, exactly as the Sequencer menu does. Arg: camera binding name (optional)."),
+		FConsoleCommandWithArgsDelegate::CreateStatic([](const TArray<FString>& Args)
+		{
+			OpenSequencers.RemoveAll([](const TWeakPtr<ISequencer>& S) { return !S.IsValid(); });
+			for (const TWeakPtr<ISequencer>& Weak : OpenSequencers)
+			{
+				const TSharedPtr<ISequencer> Sequencer = Weak.Pin();
+				if (ULevelSequence* Focused = Sequencer ? Cast<ULevelSequence>(Sequencer->GetFocusedMovieSceneSequence()) : nullptr)
+				{
+					StartBake(Focused, Sequencer, Args.Num() ? Args[0] : FString());
+					return;
+				}
+			}
+			UE_LOG(LogBlackEyeCustom, Warning, TEXT("[BlackEyeCustom] no open Sequencer to bake from"));
+		}));
 
 	void BuildMenu(FMenuBuilder& MenuBuilder, TWeakObjectPtr<UObject> WeakCamera)
 	{
@@ -160,22 +239,7 @@ namespace BlackEyeFastBake
 			FSlateIcon(),
 			FUIAction(FExecuteAction::CreateLambda([WeakSequence, WeakSequencer, Name]()
 			{
-				RunNextTick([WeakSequence, WeakSequencer, Name]()
-				{
-					ULevelSequence* Shot = WeakSequence.Get();
-					const TSharedPtr<ISequencer> Sequencer = WeakSequencer.Pin();
-					ULevelSequence* Root = Sequencer ? Cast<ULevelSequence>(Sequencer->GetRootMovieSceneSequence()) : nullptr;
-					FBlackEyeFastBakeOptions Options;
-					Options.CameraBindingName = Name;
-					const FBlackEyeFastBakeReport Report = UBlackEyeFastBakeLibrary::BakeShot(Shot, Options);
-					RestoreView(Root, Shot);
-					Notify(Report.bSuccess
-						? FText::Format(LOCTEXT("BakeDone", "Baked {0}: {1} frames in {2}s ({3}x realtime){4}"), FText::FromString(Name),
-							Report.NumFrames, FText::AsNumber(FMath::RoundToInt(Report.TotalSeconds)), FText::AsNumber(FMath::RoundToInt(Report.SpeedVsRealtime)),
-							Report.bLocked ? LOCTEXT("AndLocked", ", locked") : FText())
-						: FText::Format(LOCTEXT("BakeFailed", "Fast Bake failed for {0}: {1}"), FText::FromString(Name), FText::FromString(Report.Message)),
-						Report.bSuccess);
-				});
+				StartBake(WeakSequence, WeakSequencer, Name);
 			})));
 
 		if (Baked)

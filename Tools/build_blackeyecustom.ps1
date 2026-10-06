@@ -68,7 +68,8 @@ if (-not $Engine -and -not $Status) {
 
 function Test-EditorRunning {
     # UnrealEditor-Cmd (headless renders, commandlets) loads engine plugins too, so it locks the DLL.
-    return [bool](Get-Process UnrealEditor, UnrealEditor-Cmd -ErrorAction SilentlyContinue)
+    # CrashReportClientEditor stays open after an editor crash, holding the plugin's DLL until its window is closed.
+    return [bool](Get-Process UnrealEditor, UnrealEditor-Cmd, CrashReportClientEditor -ErrorAction SilentlyContinue)
 }
 
 # ---------------------------------------------------------------- status
@@ -187,7 +188,8 @@ foreach ($sub in @("Binaries\Win64", "Intermediate\Build")) {
     $dst = Join-Path $PluginDir $sub
     if (-not (Test-Path $src)) { continue }
     Write-Host "install $sub" -ForegroundColor Cyan
-    robocopy $src $dst /E /NFL /NDL /NJH /NJS /NP | Out-Null
+    # /R:3 /W:2: fail in seconds on a locked file. Robocopy's default (1,000,000 retries, 30 s apart) waits forever.
+    robocopy $src $dst /E /NFL /NDL /NJH /NJS /NP /R:3 /W:2 | Out-Null
     # robocopy uses 0-7 for success (1 = files copied, 3 = copied + extras). Only >= 8 is a
     # real failure. Clear it afterwards so a successful copy does not leave a non-zero
     # $LASTEXITCODE for the script to exit with, which reads as a failed install.

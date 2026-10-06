@@ -86,15 +86,18 @@ namespace BlackEyeFastBake
 			OutError = TEXT("no sequence, or no editor");
 			return nullptr;
 		}
-		AssetEditors->OpenEditorForAsset(Sequence);
 		IAssetEditorInstance* Editor = AssetEditors->FindEditorForAsset(Sequence, false);
 		TSharedPtr<ISequencer> Sequencer = Editor ? static_cast<ILevelSequenceEditorToolkit*>(Editor)->GetSequencer() : nullptr;
-		if (!Sequencer.IsValid() || Sequencer->GetRootMovieSceneSequence() != Sequence || Sequencer->GetFocusedMovieSceneSequence() != Sequence)
+		if (Sequencer.IsValid() && Sequencer->GetRootMovieSceneSequence() == Sequence && Sequencer->GetFocusedMovieSceneSequence() == Sequence)
 		{
-			OutError = TEXT("could not open the sequence as Sequencer's root and focused sequence");
-			return nullptr;
+			return Sequencer;
 		}
-		return Sequencer;
+		// Not open on its own yet. Open it, but don't bake in the same tick: a Sequencer opened this frame isn't ready
+		// to be edited, and doing so crashed (BlackEyeFastBakeMenu.cpp, SequencerSettleSeconds). The menu waits for it;
+		// a script calls again.
+		AssetEditors->OpenEditorForAsset(Sequence);
+		OutError = TEXT("the sequence wasn't open in Sequencer on its own, so it has been opened now; run again in a moment");
+		return nullptr;
 	}
 
 	/** The Black Eye camera bound in the focused sequence, by binding name or the first one found. */

@@ -256,6 +256,12 @@ Not built yet: re-sync settings without re-baking (P2); keeping the previous bak
   and actions run on the next tick. A bake started from inside an edit opens the shot alone, bakes, then reopens the
   edit and focuses back into the shot. `BlackEyeCustom.FastBake.MenuTest` builds the menu off screen for every Black
   Eye camera in the open Sequencers.
+  **Second measured crash (2026-10-06), fixed:** the bake opened the shot as a new root Sequencer and wrote the twin in
+  the same tick; that Sequencer had no track editors yet ("Unable to find a track editor for track type
+  MovieSceneFloatTrack") and asserted when the bake's transaction closed. Now a sequence opened for a bake gets half a
+  second to settle first (`SequencerSettleSeconds`), the view restore does the same, and `BakeShot` from Python refuses
+  (opens it, asks to run again) rather than editing a sequence opened in the same call. `BlackEyeCustom.FastBake.Bake
+  <binding>` runs the menu's Bake and lock from the console; it replayed the crash case cleanly.
 - **Content Browser:** right-click shot Level Sequence(s) ▸ Bake Black Eye cameras, in batch (all angles at once).
 - **`UBlackEyeFastBakeLibrary`** (built; BlueprintCallable, so Python and agents can drive it): `BakeShot(LS, Options)`,
   `SetLocked(LS, CameraBindingName, bool)`, `GetBakeInfo(LS)`, plus `BakeCameraToCsv` and the realtime record for
