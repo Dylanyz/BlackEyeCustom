@@ -248,8 +248,14 @@ Not built yet: re-sync settings without re-baking (P2); keeping the previous bak
 *Status: planned.*
 
 - **Sequencer binding right-click** (built): Black Eye Fast Bake ▸ Bake and lock / Re-bake and lock, Lock / Unlock,
-  with the bake info in the tooltips and a toast with the result (`BlackEyeFastBakeMenu.cpp`). Not yet clicked by a
-  person: the code behind it is the same as `BakeShot`.
+  with the bake info in the tooltips and a toast with the result (`BlackEyeFastBakeMenu.cpp`).
+  **Measured crash (2026-10-06), fixed:** building the submenu called `OpenEditorForAsset` to find the binding. With a
+  shot focused inside an edit, that opened the shot as a new root, destroying the Sequencer that owned the open menu,
+  and Slate asserted (`SharedPointer.h` `IsValid()` from `MenuStack.cpp`). Now building a menu has no side effects (it
+  finds the binding through the Sequencers already open, tracked via `ISequencerModule::RegisterOnSequencerCreated`),
+  and actions run on the next tick. A bake started from inside an edit opens the shot alone, bakes, then reopens the
+  edit and focuses back into the shot. `BlackEyeCustom.FastBake.MenuTest` builds the menu off screen for every Black
+  Eye camera in the open Sequencers.
 - **Content Browser:** right-click shot Level Sequence(s) ▸ Bake Black Eye cameras, in batch (all angles at once).
 - **`UBlackEyeFastBakeLibrary`** (built; BlueprintCallable, so Python and agents can drive it): `BakeShot(LS, Options)`,
   `SetLocked(LS, CameraBindingName, bool)`, `GetBakeInfo(LS)`, plus `BakeCameraToCsv` and the realtime record for
