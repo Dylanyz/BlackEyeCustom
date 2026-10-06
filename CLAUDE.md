@@ -21,6 +21,7 @@ hub's (`../CLAUDE.md`, `../.claude/refs/`); this file holds only what is BlackEy
 
 ## Start here
 
+- **Current state, the open issue, next steps → `.claude/refs/status.md` (read first)**
 - What Fast Bake does, why, the algorithm, traps, decisions, phases → `docs/fast-bake/DESIGN.md`
 - Every Black Eye symbol used, and the self-test → `Source/BlackEyeCustomEditor/Public/BlackEyeContract.h`
 - Repo-specific maintenance, the skill/repo knowledge split, Black Eye update checklist → `.claude/refs/maintenance.md`
@@ -54,7 +55,7 @@ to match one (trap 4.12).
 |---|---|
 | `BlackEyeCustom.uplugin` | one `Editor` module, Win64, `Installed: true`, no Black Eye dependency |
 | `Source/BlackEyeCustomEditor/` | `BlackEyeContract` (every Black Eye name + `RunSelfTest`), module + console command. Each extension adds a `Private/<Extension>/` folder |
-| `Source/.../Private/FastBake/`, `Public/BlackEyeFastBakeLibrary.h` | the bake loop and its Python/Blueprint entry points (`BakeCameraToCsv`, `Start/StopRealtimeRecord`) |
+| `Source/.../Private/FastBake/`, `Public/BlackEyeFastBakeLibrary.h` | `BlackEyeFastBake.cpp` the bake loop (`RunBake`); `BlackEyeFastBakeTwin.cpp` the twin, lock/unlock, bake info; `BlackEyeFastBakeMenu.cpp` the Sequencer menu and console commands; library: `BakeShot`, `SetLocked`, `GetBakeInfo`, `BakeCameraToCsv`, `Start/StopRealtimeRecord` |
 | `Tools/fast_bake_repro.py`, `Tools/compare_bake.py` | builds the repro scene in any project; compares baked vs realtime tracks (plain Python) |
 | `docs/<extension>/DESIGN.md` | one living design doc per extension; `docs/<extension>/data/` for measurements |
 | `Tools/` | `build_blackeyecustom.ps1` (package `%TEMP%\bcb`), `install_junction.ps1` |

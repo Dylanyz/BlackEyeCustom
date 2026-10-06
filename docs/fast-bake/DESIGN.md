@@ -18,7 +18,7 @@ reproduced here; the files cited ship with each product's source.
 | [7. What becomes trivial inside Black Eye](#7-what-becomes-trivial-inside-black-eye) | planned |
 | [8. Measured numbers](#8-measured-numbers) | measured on the repro and on a production angle (P0) |
 | [9. Decisions and rejected ideas](#9-decisions-and-rejected-ideas) | live |
-| [10. Phases](#10-phases) | P0 and P1 done; P2 next |
+| [10. Phases](#10-phases) | P0 done; P1 built with an open alignment issue (`.claude/refs/status.md`); P2 next |
 | [11. Open questions](#11-open-questions) | live |
 | [12. Verification](#12-verification) | planned |
 
@@ -391,6 +391,8 @@ own spread, and it repeats (trap 4.15). Locking a bake is the only way this shot
 - **P1 MVP:** *done 2026-10-06.* Repro script; `BE-NATIVE` tags; README section; bake into the twin (full range
   or a frame range with warm-up); lock/unlock; binding menu and library; non-Black-Eye components (DynamicLens);
   cancel/progress; undo. Full-range bakes of three production angles: 87k frames in 3.8 min (12-24x realtime).
+- **Open (2026-10-06):** Dylan reports the twin doesn't line up with the live camera (it sits further back). Measured
+  and hypotheses in `.claude/refs/status.md`; the next step is comparing the twin with *playback*, not a parked camera.
 - **P2 batch and UX:** Content Browser batch over a shots folder; bake info (date, range, BEC parameter hash); a stale
   flag when BEC tracks or subject sections change (reusing AutoBake's track-signature idea); re-sync settings.
 - **P3 speed** (only if P0 numbers need it): edit-aware partial bakes (only the ranges each shot is cut into, plus

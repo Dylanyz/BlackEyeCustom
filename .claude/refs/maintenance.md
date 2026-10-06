@@ -35,5 +35,9 @@ Rebuild and reinstall (hub `refs/build-install.md`); re-pin the engine citations
 
 ## Log
 
+- 2026-10-06 (end of session 1): P0 done, P1 built (twin, lock/unlock, menu, undo, DynamicLens copy, settle). Two
+  menu crashes fixed. Open alignment issue handed over in `status.md`. Build scripts (all repos + template) now
+  treat the crash reporter as a running editor and fail fast on locked files.
+
 - 2026-10-06: repo created as the home for Black Eye extensions; Fast Bake plan moved in as
   `docs/fast-bake/DESIGN.md`; plugin skeleton with the contract self-test.
