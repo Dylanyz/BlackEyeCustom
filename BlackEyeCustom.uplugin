@@ -1,0 +1,26 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "0.1.0",
+	"FriendlyName": "Black Eye Custom",
+	"Description": "Editor extensions for the Black Eye camera plugin, written as reference implementations for its developers. First extension: Fast Bake, an offline, faster-than-realtime bake of a Black Eye camera's solved motion into Sequencer keys, so cameras cut into an edit play without the damping jolt.",
+	"Category": "Cinematics",
+	"CreatedBy": "Mad Rice (Dylan Gitalis)",
+	"CreatedByURL": "https://github.com/Dylanyz",
+	"DocsURL": "",
+	"MarketplaceURL": "",
+	"SupportURL": "",
+	"EngineVersion": "5.8.0",
+	"CanContainContent": false,
+	"IsBetaVersion": false,
+	"IsExperimentalVersion": true,
+	"Installed": true,
+	"Modules": [
+		{
+			"Name": "BlackEyeCustomEditor",
+			"Type": "Editor",
+			"LoadingPhase": "Default",
+			"PlatformAllowList": [ "Win64" ]
+		}
+	]
+}

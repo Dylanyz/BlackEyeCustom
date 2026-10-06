@@ -1,0 +1,17 @@
+# UE plugin build products (rebuilt with Tools\build_blackeyecustom.ps1, see README)
+Binaries/
+Intermediate/
+# editor/plugin junk
+Saved/
+*.pdb
+__pycache__/
+*.pyc
+.vs/
+*.swp
+.DS_Store
+
+# agent-local files
+.claude/archive/
+CLAUDE.local.md
+# per-machine Claude Code settings (shared auto-memory pool); must stay untracked
+.claude/settings.local.json

@@ -1,0 +1,27 @@
+Black Eye Custom
+Copyright 2026 Dylan Gitalis (Mad Rice)
+
+This product includes software developed by Dylan Gitalis (Mad Rice).
+
+Licensed under the Apache License, Version 2.0. See LICENSE for the full
+terms. If you redistribute Black Eye Custom, in source or binary form, this
+NOTICE file must travel with it (Apache-2.0 section 4d).
+
+
+THIRD-PARTY AND TRADEMARK NOTES
+-------------------------------
+
+Black Eye is a product of Black Eye Technologies. This project is an
+independent extension of it and contains NO Black Eye source code, binaries
+or assets. It reaches Black Eye at runtime by class, function and property
+name through Unreal's reflection system, and does not link against it.
+Descriptions of Black Eye behaviour in docs/ cite file and line numbers of
+Black Eye's own source, which ships with the plugin to its licensees; no
+Black Eye source is reproduced here.
+
+Unreal Engine is a trademark of Epic Games, Inc. This project is not
+affiliated with or endorsed by Epic Games. Descriptions of Unreal Engine
+behaviour in docs/ refer to publicly available engine source that Unreal
+licensees can read, and no engine source is reproduced here. The plugin's
+own source links against the Unreal Engine under the Unreal Engine EULA,
+as any UE plugin does.
