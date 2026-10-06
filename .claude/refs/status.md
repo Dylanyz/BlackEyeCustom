@@ -30,7 +30,7 @@ not built: re-snap the camera when a Follow target jumps in one frame (DESIGN se
 
 ## Where things are
 
-- **Test project:** `MDR_58_tester`, repro at `/Game/Claude/FastBake/` (launch with
+- **Test project:** the tester project, repro at `/Game/Claude/FastBake/` (launch with
   `-DisablePlugins=MetaHumanCrowdContent,MovieSceneAnimMixer`, DESIGN trap 4.11).
 - **Production checks** run in the film project only with Dylan's say-so; its specifics are in that project's
   `.claude/refs/blackeye-fast-bake.md`, never here. Dylan's short test duplicate of an angle (suffix `_BAKE-TEST`)

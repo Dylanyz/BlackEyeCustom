@@ -2,7 +2,7 @@
 
 A C++ UE 5.8 editor plugin by Dylan Gitalis (Mad Rice): the home for our custom extensions to the Black Eye camera
 plugin (Fab, 2.0.7). Dylan shares this repo with Black Eye's developers so they can rebuild each extension natively;
-the repo *is* that handoff. First extension: **Fast Bake** (`docs/fast-bake/DESIGN.md`). Private, no remote yet ·
+the repo *is* that handoff. First extension: **Fast Bake** (`docs/fast-bake/DESIGN.md`). Public on GitHub (`Dylanyz/BlackEyeCustom`, 2026-10-06) ·
 CPAL-1.0 + Commons Clause, plus a permission for Black Eye Technologies (`.claude/rules/licensing-and-credits.md`).
 
 **This repo is the installed plugin.** `Engine\Plugins\Marketplace\BlackEyeCustom` is a junction to this folder. Docs
