@@ -9,9 +9,21 @@
 
 class ISequencer;
 class ULevelSequence;
+class UMovieScene;
 
 namespace BlackEyeFastBake
 {
+	/** A Black Eye camera and its baked twin, from the binding tag the twin writer leaves (BlackEyeFastBakeTwin.cpp). */
+	struct FTwin
+	{
+		FGuid Camera;
+		FGuid Twin;          // the newest tagged twin whose binding exists; invalid when none does
+		TArray<FGuid> Stale; // every other tagged twin: removed, or older. Camera cuts may still point at them
+	};
+
+	/** Every baked camera in the sequence. */
+	TArray<FTwin> FindTwins(const UMovieScene& MovieScene);
+
 	/** One baked frame: what the Black Eye camera solved, plus its subjects for checking. */
 	struct FSample
 	{

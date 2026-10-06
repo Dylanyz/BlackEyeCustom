@@ -43,20 +43,47 @@ namespace BlackEyeFastBake
 		return FName(*(FString(TwinTagPrefix) + Camera.ToString(EGuidFormats::Digits)));
 	}
 
-	/** Every (Black Eye camera, twin) pair recorded in the sequence's binding tags. */
-	TArray<TPair<FGuid, FGuid>> FindTwins(const UMovieScene& MovieScene)
+	/**
+	 * A tag can name several twins: `UMovieScene::TagBinding` appends (MovieScene.cpp:593-599), and a binding removed
+	 * from script, not through Sequencer's Delete (ObjectBindingModel.cpp:1135-1149, which untags), leaves its ID behind.
+	 * Measured on a production shot (2026-10-06): five IDs, only the last alive. Reading the first made every re-bake
+	 * create a new twin that the locked camera cut never showed, and made Lock / Unlock and the bake info act on a
+	 * dead binding. So the twin is the newest ID whose binding exists, and the rest are stale.
+	 */
+	TArray<FTwin> FindTwins(const UMovieScene& MovieScene)
 	{
-		TArray<TPair<FGuid, FGuid>> Pairs;
+		TArray<FTwin> Out;
 		for (const TPair<FName, FMovieSceneObjectBindingIDs>& Tag : MovieScene.AllTaggedBindings())
 		{
 			FString Name = Tag.Key.ToString();
 			FGuid Camera;
-			if (Name.RemoveFromStart(TwinTagPrefix) && FGuid::Parse(Name, Camera) && Tag.Value.IDs.Num() > 0)
+			if (!Name.RemoveFromStart(TwinTagPrefix) || !FGuid::Parse(Name, Camera) || Tag.Value.IDs.Num() == 0)
 			{
-				Pairs.Emplace(Camera, Tag.Value.IDs[0].GetGuid());
+				continue;
+			}
+			FTwin& Twin = Out.AddDefaulted_GetRef();
+			Twin.Camera = Camera;
+			for (int32 i = Tag.Value.IDs.Num() - 1; i >= 0; --i)
+			{
+				const FGuid Id = Tag.Value.IDs[i].GetGuid();
+				if (!Twin.Twin.IsValid() && MovieScene.FindBinding(Id))
+				{
+					Twin.Twin = Id;
+				}
+				else if (Id != Twin.Twin)
+				{
+					Twin.Stale.AddUnique(Id);
+				}
 			}
 		}
-		return Pairs;
+		return Out;
+	}
+
+	/** Leaves the camera's tag naming only its current twin, so a sequence stops carrying dead ones. */
+	void RetagTwin(UMovieScene& MovieScene, const FGuid& Camera, const FGuid& Twin)
+	{
+		MovieScene.RemoveTag(TwinTag(Camera));
+		MovieScene.TagBinding(TwinTag(Camera), UE::MovieScene::FFixedObjectBindingID(Twin, MovieSceneSequenceID::Root));
 	}
 
 	FString BindingName(const UMovieScene& MovieScene, const FGuid& Guid)
@@ -297,13 +324,13 @@ namespace BlackEyeFastBake
 		const FGuid Twin = FSequencerUtilities::MakeNewSpawnable(Sequencer, *ACineCameraActor::StaticClass(), nullptr, true, FName(*Name));
 		if (Twin.IsValid())
 		{
-			MovieScene.SetObjectDisplayName(Twin, FText::FromString(Name));
-			MovieScene.TagBinding(TwinTag(Camera), UE::MovieScene::FFixedObjectBindingID(Twin, MovieSceneSequenceID::Root));
+			MovieScene.SetObjectDisplayName(Twin, FText::FromString(Name)); // WriteTwin tags it (RetagTwin)
 		}
 		return Twin;
 	}
 
-	int32 RebindCuts(UMovieScene& MovieScene, const FGuid& From, const FGuid& To)
+	/** Points every camera cut on any of From at To. */
+	int32 RebindCuts(UMovieScene& MovieScene, TConstArrayView<FGuid> From, const FGuid& To)
 	{
 		int32 Changed = 0;
 		if (UMovieSceneCameraCutTrack* Cuts = Cast<UMovieSceneCameraCutTrack>(MovieScene.GetCameraCutTrack()))
@@ -311,7 +338,7 @@ namespace BlackEyeFastBake
 			for (UMovieSceneSection* Section : Cuts->GetAllSections())
 			{
 				UMovieSceneCameraCutSection* Cut = Cast<UMovieSceneCameraCutSection>(Section);
-				if (Cut && Cut->GetCameraBindingID().GetGuid() == From)
+				if (Cut && From.Contains(Cut->GetCameraBindingID().GetGuid()) && Cut->GetCameraBindingID().GetGuid() != To)
 				{
 					Cut->Modify();
 					Cut->SetCameraBindingID(UE::MovieScene::FRelativeObjectBindingID(To));
@@ -355,11 +382,13 @@ bool BlackEyeFastBake::WriteTwin(ULevelSequence* Sequence, const FBlackEyeFastBa
 
 	// Find this camera's twin, or make it.
 	FGuid Twin;
-	for (const TPair<FGuid, FGuid>& Pair : FindTwins(MovieScene))
+	TArray<FGuid> Stale;
+	for (const FTwin& Found : FindTwins(MovieScene))
 	{
-		if (Pair.Key == Bake.CameraBinding && MovieScene.FindBinding(Pair.Value))
+		if (Found.Camera == Bake.CameraBinding)
 		{
-			Twin = Pair.Value;
+			Twin = Found.Twin;
+			Stale = Found.Stale;
 		}
 	}
 	if (!Twin.IsValid())
@@ -371,6 +400,9 @@ bool BlackEyeFastBake::WriteTwin(ULevelSequence* Sequence, const FBlackEyeFastBa
 		Report.Message = TEXT("could not create the twin camera");
 		return false;
 	}
+	RetagTwin(MovieScene, Bake.CameraBinding, Twin);
+	// A cut left on a stale twin was locked to an older bake: it plays this one now, lock or not.
+	RebindCuts(MovieScene, Stale, Twin);
 	Report.TwinBindingName = BindingName(MovieScene, Twin);
 
 	// The live Black Eye camera, for its settings: the bake left the sequence evaluated, so it is spawned.
@@ -441,7 +473,7 @@ bool BlackEyeFastBake::WriteTwin(ULevelSequence* Sequence, const FBlackEyeFastBa
 
 	if (Options.bLockAfterBake)
 	{
-		RebindCuts(MovieScene, Bake.CameraBinding, Twin);
+		RebindCuts(MovieScene, { Bake.CameraBinding }, Twin);
 	}
 	Report.bLocked = IsLocked(MovieScene, Twin);
 	Sequencer.NotifyMovieSceneDataChanged(EMovieSceneDataChangeType::MovieSceneStructureItemsChanged);
@@ -458,11 +490,26 @@ int32 BlackEyeFastBake::SetLocked(ULevelSequence* Sequence, const FString& Camer
 	}
 	const FScopedTransaction Transaction(bLocked ? LOCTEXT("Lock", "Lock Black Eye bake") : LOCTEXT("Unlock", "Unlock Black Eye bake"));
 	int32 Changed = 0;
-	for (const TPair<FGuid, FGuid>& Pair : FindTwins(*MovieScene))
+	for (const FTwin& Found : FindTwins(*MovieScene))
 	{
-		if (CameraBindingName.IsEmpty() || BindingName(*MovieScene, Pair.Key) == CameraBindingName)
+		if (!CameraBindingName.IsEmpty() && BindingName(*MovieScene, Found.Camera) != CameraBindingName)
 		{
-			Changed += bLocked ? RebindCuts(*MovieScene, Pair.Key, Pair.Value) : RebindCuts(*MovieScene, Pair.Value, Pair.Key);
+			continue;
+		}
+		// Cuts on a stale twin move too: to the current twin on lock, back to the live camera on unlock.
+		TArray<FGuid> From = Found.Stale;
+		if (bLocked && Found.Twin.IsValid())
+		{
+			From.Add(Found.Camera);
+			Changed += RebindCuts(*MovieScene, From, Found.Twin);
+		}
+		else if (!bLocked)
+		{
+			if (Found.Twin.IsValid())
+			{
+				From.Add(Found.Twin);
+			}
+			Changed += RebindCuts(*MovieScene, From, Found.Camera);
 		}
 	}
 	if (Changed > 0)
@@ -481,13 +528,17 @@ TArray<FBlackEyeBakeInfo> BlackEyeFastBake::GetBakeInfo(ULevelSequence* Sequence
 		return Out;
 	}
 	const TSharedRef<UE::MovieScene::FSharedPlaybackState> State = MovieSceneHelpers::CreateTransientSharedPlaybackState(GWorld, Sequence);
-	for (const TPair<FGuid, FGuid>& Pair : FindTwins(*MovieScene))
+	for (const FTwin& Found : FindTwins(*MovieScene))
 	{
+		if (!Found.Twin.IsValid())
+		{
+			continue; // every twin it had is gone: not baked, as far as the menu is concerned
+		}
 		FBlackEyeBakeInfo& Info = Out.AddDefaulted_GetRef();
-		Info.CameraBindingName = BindingName(*MovieScene, Pair.Key);
-		Info.TwinBindingName = BindingName(*MovieScene, Pair.Value);
-		Info.bLocked = IsLocked(*MovieScene, Pair.Value);
-		if (const AActor* Template = Cast<AActor>(MovieSceneHelpers::GetObjectTemplate(Sequence, Pair.Value, State)))
+		Info.CameraBindingName = BindingName(*MovieScene, Found.Camera);
+		Info.TwinBindingName = BindingName(*MovieScene, Found.Twin);
+		Info.bLocked = IsLocked(*MovieScene, Found.Twin);
+		if (const AActor* Template = Cast<AActor>(MovieSceneHelpers::GetObjectTemplate(Sequence, Found.Twin, State)))
 		{
 			for (const FName& Tag : Template->Tags)
 			{

@@ -125,6 +125,38 @@ namespace BlackEyeFastBake
 		return nullptr;
 	}
 
+	/**
+	 * With no camera named: the Black Eye camera the shot's camera cuts play, so a shot holding a spare one picks the
+	 * right camera. A locked shot's cut plays the twin, so a twin maps back to the camera it was baked from; without
+	 * that, a re-bake of a locked shot baked the spare (measured 2026-10-06). Invalid when no cut leads to one.
+	 */
+	FGuid CutCameraBinding(ISequencer& Sequencer, const UMovieScene& MovieScene)
+	{
+		const UMovieSceneCameraCutTrack* Cuts = Cast<UMovieSceneCameraCutTrack>(MovieScene.GetCameraCutTrack());
+		if (!Cuts)
+		{
+			return FGuid();
+		}
+		const TArray<FTwin> Twins = FindTwins(MovieScene);
+		for (const UMovieSceneSection* Section : Cuts->GetAllSections())
+		{
+			const UMovieSceneCameraCutSection* Cut = Cast<UMovieSceneCameraCutSection>(Section);
+			FGuid Candidate = Cut ? Cut->GetCameraBindingID().GetGuid() : FGuid();
+			for (const FTwin& Twin : Twins)
+			{
+				if (Twin.Twin == Candidate || Twin.Stale.Contains(Candidate))
+				{
+					Candidate = Twin.Camera;
+				}
+			}
+			if (Candidate.IsValid() && FindCamera(Sequencer, FString(), Candidate))
+			{
+				return Candidate;
+			}
+		}
+		return FGuid();
+	}
+
 	/** Evaluates the root sequence at a display frame, blocking. Root == focused, so no time transform is needed. */
 	void Evaluate(ISequencer& Sequencer, const UMovieScene& MovieScene, FFrameTime DisplayTime)
 	{
@@ -305,24 +337,8 @@ FBlackEyeFastBakeReport BlackEyeFastBake::RunBake(ULevelSequence* Sequence, cons
 
 	// Spawnables exist only once evaluated, so evaluate the first frame before looking for the camera.
 	Evaluate(*Sequencer, MovieScene, FFrameTime(WarmUpStart));
-	// No name given: the Black Eye camera the shot's camera cuts use, so a shot holding a spare camera bakes the
-	// one that plays. Only then the first Black Eye camera bound.
-	FGuid Binding;
-	if (Options.CameraBindingName.IsEmpty())
-	{
-		if (const UMovieSceneCameraCutTrack* Cuts = Cast<UMovieSceneCameraCutTrack>(MovieScene.GetCameraCutTrack()))
-		{
-			for (const UMovieSceneSection* Section : Cuts->GetAllSections())
-			{
-				const UMovieSceneCameraCutSection* Cut = Cast<UMovieSceneCameraCutSection>(Section);
-				FGuid Candidate = Cut ? Cut->GetCameraBindingID().GetGuid() : FGuid();
-				if (!Binding.IsValid() && Candidate.IsValid() && FindCamera(*Sequencer, FString(), Candidate))
-				{
-					Binding = Candidate;
-				}
-			}
-		}
-	}
+	// No name given: the camera the cuts play (through a twin if locked), and only then the first Black Eye camera.
+	FGuid Binding = Options.CameraBindingName.IsEmpty() ? CutCameraBinding(*Sequencer, MovieScene) : FGuid();
 	ACineCameraActor* Camera = FindCamera(*Sequencer, Options.CameraBindingName, Binding);
 	if (!Camera)
 	{
@@ -540,7 +556,9 @@ bool UBlackEyeFastBakeLibrary::StartRealtimeRecord(ULevelSequence* Sequence, con
 
 	FString Error;
 	TSharedPtr<ISequencer> Sequencer = OpenSequencer(Sequence, Error);
-	FGuid Binding;
+	// Same camera choice as the bake, so a record and a bake of a shot compare the same camera.
+	FGuid Binding = Sequencer && CameraBindingName.IsEmpty()
+		? CutCameraBinding(*Sequencer, *Sequencer->GetFocusedMovieSceneSequence()->GetMovieScene()) : FGuid();
 	ACineCameraActor* Camera = Sequencer ? FindCamera(*Sequencer, CameraBindingName, Binding) : nullptr;
 	if (!Camera)
 	{

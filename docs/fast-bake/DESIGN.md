@@ -12,13 +12,13 @@ reproduced here; the files cited ship with each product's source.
 | [1. The problem and its root cause](#1-the-problem-and-its-root-cause) | confirmed from source |
 | [2. What already exists, and why none of it fits](#2-what-already-exists-and-why-none-of-it-fits) | confirmed from source |
 | [3. The algorithm](#3-the-algorithm) | built |
-| [4. Traps](#4-traps) | 4.11-4.15 measured in P0; 4.1 and 4.4 confirmed; the rest from source and review |
+| [4. Traps](#4-traps) | 4.11-4.17 measured; 4.1 and 4.4 confirmed; the rest from source and review |
 | [5. Output: the baked twin, lock and unlock](#5-output-the-baked-twin-lock-and-unlock) | built, measured on a production edit |
 | [6. Entry points](#6-entry-points) | library and Sequencer menu built; Content Browser batch is P2 |
 | [7. What becomes trivial inside Black Eye](#7-what-becomes-trivial-inside-black-eye) | planned |
 | [8. Measured numbers](#8-measured-numbers) | measured on the repro and on a production angle (P0) |
 | [9. Decisions and rejected ideas](#9-decisions-and-rejected-ideas) | live |
-| [10. Phases](#10-phases) | P0 done; P1 built with an open alignment issue (`.claude/refs/status.md`); P2 next |
+| [10. Phases](#10-phases) | P0 done; P1 built, alignment checked against playback, twin-tag fix awaiting install (`.claude/refs/status.md`); P2 next |
 | [11. Open questions](#11-open-questions) | live |
 | [12. Verification](#12-verification) | planned |
 
@@ -204,6 +204,27 @@ needs no symbol because `Tick` is virtual on `AActor`. Every name used is checke
     popped 76 cm four frames into a shot (an animation discontinuity) left the twin gliding ~70 cm over about a second
     (Follow damping 1 s), while the parked live camera sat on the new target, 40-55 cm "closer". The bake is right; the
     reference is playback or a render. Pops in the subject show up as camera glides in both.
+    **Measured against playback (2026-10-06):** the same 134-frame production shot, live camera parked 10 s on the
+    first frame and then played unlocked at about 70-76 editor fps (~2.4 ticks per frame), sampled after every world
+    tick. Twin vs live camera, same tick: at most 1.1 cm / 0.10 deg (the glide after the pop), 0.0-0.1 cm elsewhere.
+    CSV bakes vs that record: 1 sub-step 0.34 / 1.14 cm mean / max, 0.05 / 0.11 deg; 2 sub-steps 0.57 cm max; 3 sub-steps
+    0.38 cm max (trap 4.12, small on this shot). The rendered view (`UCameraComponent::GetCameraView`) equals the
+    component's world transform to 0.000 at every tick, and Black Eye 2.0.7 overrides neither `GetCameraView` nor
+    `CalcCamera`, so sampling the component is the right thing to bake.
+17. **Measured: a twin's binding tag can name dead twins.** `UMovieScene::TagBinding` appends to the tag's ID list
+    (`MovieScene.cpp:593-599`), and a binding removed any way other than Sequencer's Delete (which untags,
+    `ObjectBindingModel.cpp:1135-1149`) leaves its ID in the list. A production shot carried five twin IDs, only the
+    last one alive. Reading the first ID had three effects:
+    - every re-bake created a new twin, and Bake and lock couldn't move the camera cut onto it, because the cut pointed
+      at the previous twin rather than the Black Eye camera, so **the shot kept playing an older bake** (the log shows
+      every re-bake after the first ending without "locked");
+    - Lock / Unlock and the bake info acted on the dead twin: the menu offered Lock on a locked shot, and Unlock changed
+      nothing;
+    - a bake with no camera named, on a locked shot, didn't recognise the twin in the cut and fell back to the first
+      Black Eye camera bound: the shot's unused spare (no subjects, focal 12 mm).
+    Fix (built 2026-10-06, `FindTwins`): the twin is the newest tagged ID whose binding exists, the rest are stale. A
+    bake retags so the tag names only its twin and moves cuts off stale twins; lock and unlock move cuts on stale twins
+    too; with no camera named, a cut on a twin maps back to its Black Eye camera (bake and realtime record alike).
 
 ## 5. Output: the baked twin, lock and unlock
 
@@ -391,8 +412,10 @@ own spread, and it repeats (trap 4.15). Locking a bake is the only way this shot
 - **P1 MVP:** *done 2026-10-06.* Repro script; `BE-NATIVE` tags; README section; bake into the twin (full range
   or a frame range with warm-up); lock/unlock; binding menu and library; non-Black-Eye components (DynamicLens);
   cancel/progress; undo. Full-range bakes of three production angles: 87k frames in 3.8 min (12-24x realtime).
-- **Open (2026-10-06):** Dylan reports the twin doesn't line up with the live camera (it sits further back). Measured
-  and hypotheses in `.claude/refs/status.md`; the next step is comparing the twin with *playback*, not a parked camera.
+- **Alignment (2026-10-06):** Dylan reported the twin didn't line up with the live camera (it sat further back).
+  Against *playback* the twin matches to 1.1 cm / 0.1 deg (trap 4.16). Two causes remain: a parked live camera has
+  caught up with its subject while playback lags by its damping (4.16), and re-bakes of a locked shot kept playing an
+  older twin (4.17, fix built, not yet installed or verified).
 - **P2 batch and UX:** Content Browser batch over a shots folder; bake info (date, range, BEC parameter hash); a stale
   flag when BEC tracks or subject sections change (reusing AutoBake's track-signature idea); re-sync settings.
 - **P3 speed** (only if P0 numbers need it): edit-aware partial bakes (only the ranges each shot is cut into, plus
