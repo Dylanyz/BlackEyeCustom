@@ -37,6 +37,13 @@ struct FBlackEyeFastBakeOptions
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Fast Bake", meta = (ClampMin = 1, ClampMax = 16))
 	int32 SubSteps = 1;
 
+	/**
+	 * After the opening snap, the camera ticks this long with time held at the first frame, so the bake starts settled
+	 * where the live camera sits when the editor is parked there. 0 starts from the raw snap (DESIGN trap 4.15).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Fast Bake", meta = (ClampMin = 0, Units = "s"))
+	float SettleSeconds = 10.f;
+
 	/** Refresh only the subjects' skeletal meshes each frame (fast). False refreshes every skeletal mesh in the world. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Fast Bake")
 	bool bRefreshSubjectsOnly = true;

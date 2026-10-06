@@ -195,6 +195,15 @@ needs no symbol because `Tick` is virtual on `AActor`. Every name used is checke
     of the same range started from different leftover states agree to 0.05 cm / 0.02 deg mean (max 0.4 cm / 0.1
     deg). A few seconds of warm-up removes even that; renders have the same dependence on their warm-up.
     BE-NATIVE: a snap that solves from a canonical state would make bakes bit-identical.
+    **Built (2026-10-06): settle after the snap.** After the opening snap the camera ticks `SettleSeconds` (default
+    10 s) with time held at the first frame, as the live camera does while the editor is parked there, so a bake starts
+    where the parked live camera sits. Measured on a short production shot: the raw snap left the twin ~60 cm off the
+    Follow target a second in; with settling the first frame is within 13 cm of the parked live camera.
+16. **Comparing a twin with a parked live camera is not the test.** Parked, a live Black Eye camera keeps ticking until
+    it has fully caught up with its subject; during playback it lags by its damping. Measured: a subject whose pelvis
+    popped 76 cm four frames into a shot (an animation discontinuity) left the twin gliding ~70 cm over about a second
+    (Follow damping 1 s), while the parked live camera sat on the new target, 40-55 cm "closer". The bake is right; the
+    reference is playback or a render. Pops in the subject show up as camera glides in both.
 
 ## 5. Output: the baked twin, lock and unlock
 

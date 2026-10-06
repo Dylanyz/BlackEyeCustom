@@ -466,6 +466,18 @@ FBlackEyeFastBakeReport BlackEyeFastBake::RunBake(ULevelSequence* Sequence, cons
 		if (Frame == WarmUpStart)
 		{
 			Step(FFrameTime(Frame), Frame, true);
+			// The snap is one huge-dt tick and lands somewhere else than where Follow and LookAt settle (trap 4.15):
+			// 60 cm off on a production camera, still visible a second later in a short shot. So settle with time held
+			// at the first frame, as the live camera does while the editor is parked there.
+			// BE-NATIVE: a snap that solves to the settled state would make this unnecessary (DESIGN section 7).
+			const int32 SettleTicks = FMath::CeilToInt(FMath::Max(0.f, Options.SettleSeconds) / StepDt);
+			const double TSettle = FPlatformTime::Seconds();
+			for (int32 I = 0; I < SettleTicks && Camera; ++I)
+			{
+				Camera->Tick(StepDt);
+				TickCameraComponents(Camera, StepDt);
+			}
+			TTick += FPlatformTime::Seconds() - TSettle;
 		}
 		else
 		{
