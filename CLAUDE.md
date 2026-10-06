@@ -45,8 +45,9 @@ judge by the `PASSED` line. (Verified 2026-10-06.)
 **Testing Fast Bake** (tester project, repro at `/Game/Claude/FastBake/`): launch the tester with
 `-DisablePlugins=MetaHumanCrowdContent,MovieSceneAnimMixer` or every subject freezes (DESIGN trap 4.11). Bake and
 record from Python (README "Reproduce"); `BlackEyeCustom.FastBake.Verbose 1` logs each subject mesh's anim state.
-Realtime records need "Use Less CPU when in Background" off (`bThrottleCPUWhenNotForeground` on
-`/Script/UnrealEd.Default__EditorPerformanceSettings`), and the bake must use `SubSteps` = editor fps / sequence fps
+Realtime records need "Use Less CPU when in Background" off (Dylan keeps it off; check with
+`unreal.load_object(None, "/Script/UnrealEd.Default__EditorPerformanceSettings").get_editor_property("bThrottleCPUWhenNotForeground")`:
+only the C++ name works, the snake-case names fail), and the bake must use `SubSteps` = editor fps / sequence fps
 to match one (trap 4.12).
 
 ## Layout
