@@ -7,7 +7,7 @@ end of every session that changes the plugin.
 ## Phase
 
 - **P0 (spike, measurements): done.** DESIGN §8, §10.
-- **P1 (twin, lock/unlock, menu, undo): built and installed; the twin-tag fix (trap 4.17) is built, not installed.** DESIGN §5, §6.
+- **P1 (twin, lock/unlock, menu, undo): built and installed; the twin-tag fix (trap 4.17) installed 2026-10-06, self-test PASSED, not yet verified on a shot.** DESIGN §5, §6.
 - **P2 (batch, stale flag, re-sync settings): not started.** DESIGN §10.
 
 ## What works (verified in the editor, 2026-10-06)
@@ -29,7 +29,7 @@ Dylan: "the bake seems further away than the blackeye", then "still not lined up
   at 1-3 sub-steps within 0.4-1.1 cm. DESIGN trap 4.16.
 - **Ruled out:** hypothesis 2 (rendered view = component transform to 0.000) and 3 (Black Eye 2.0.7 overrides neither
   `GetCameraView` nor `CalcCamera`). Hypothesis 4 (tick rate) is real but ~1 cm on this shot. 5 not tested.
-- **Found and fixed (built, NOT installed; the film's editor was open): DESIGN trap 4.17.** The twin's binding tag
+- **Found and fixed (installed, self-test PASSED; behaviour on the shot not yet verified): DESIGN trap 4.17.** The twin's binding tag
   held five twin IDs, four of them dead, and the code read the first. Effects: re-bakes of a locked shot made new twins
   the cut never showed (the shot kept playing an *older* bake, very likely what Dylan saw "after the last fix");
   Unlock did nothing and the menu offered Lock on a locked shot; a bake with no camera named baked the spare BEC.
@@ -38,7 +38,7 @@ Dylan: "the bake seems further away than the blackeye", then "still not lined up
   moves (4.16). Ask Dylan how he compares (parked toggle, edit playback, render).
 
 **Next:**
-1. Install (`Toolsuild_blackeyecustom.ps1 -InstallOnly`, editor closed, Dylan's go), relaunch, `BlackEyeCustom.SelfTest`.
+1. ~~Install~~ done 2026-10-06; SelfTest PASSED.
 2. On the test shot: `GetBakeInfo` should report the twin, locked. Unlock from the menu should show the live camera;
    Bake and lock should rewrite the same twin and leave the tag with one ID.
 3. Re-bake, lock, and have Dylan compare in playback. If he still sees an offset, record the edit's playback with the
