@@ -19,6 +19,7 @@
 #include "MovieSceneCommonHelpers.h"
 #include "MovieSceneObjectBindingID.h"
 #include "Interfaces/IPluginManager.h"
+#include "Misc/ScopeExit.h"
 #include "ScopedTransaction.h"
 #include "Sections/MovieScene3DTransformSection.h"
 #include "Sections/MovieSceneCameraCutSection.h"
@@ -377,6 +378,30 @@ bool BlackEyeFastBake::WriteTwin(ULevelSequence* Sequence, const FBlackEyeFastBa
 	}
 	ISequencer& Sequencer = *Bake.Sequencer;
 	UMovieScene& MovieScene = *Sequence->GetMovieScene();
+
+	// The bake has put the playhead back where the user left it, which may be outside the shot, where neither the
+	// camera nor the twin is spawned. Write at the first baked frame, and put the playhead back afterwards. Checked
+	// here, before anything is modified: cancelling a transaction doesn't revert what it already changed
+	// (UTransBuffer::Cancel, EditorTransaction.cpp:1411-1453), so a failure past this point would leave a half twin.
+	const FFrameTime UserTime = Sequencer.GetLocalTime().Time;
+	ON_SCOPE_EXIT
+	{
+		Sequencer.SetLocalTimeDirectly(UserTime);
+		Sequencer.ForceEvaluate();
+	};
+	Sequencer.SetLocalTimeDirectly(FFrameRate::TransformTime(FFrameTime::FromDecimal(Bake.Samples[0].Frame), MovieScene.GetDisplayRate(), MovieScene.GetTickResolution()));
+	Sequencer.ForceEvaluate();
+	bool bCameraSpawned = false;
+	for (const TWeakObjectPtr<>& Bound : Sequencer.FindBoundObjects(Bake.CameraBinding, Sequencer.GetFocusedTemplateID()))
+	{
+		bCameraSpawned |= Bound.IsValid();
+	}
+	if (!bCameraSpawned)
+	{
+		Report.Message = TEXT("the Black Eye camera isn't spawned at the first baked frame; nothing was written");
+		return false;
+	}
+
 	const FScopedTransaction Transaction(LOCTEXT("FastBake", "Black Eye Fast Bake"));
 	Sequence->Modify();
 	MovieScene.Modify();
@@ -453,8 +478,10 @@ bool BlackEyeFastBake::WriteTwin(ULevelSequence* Sequence, const FBlackEyeFastBa
 
 	Sequencer.GetSpawnRegister().SaveDefaultSpawnableState(Twin, Sequencer.GetFocusedTemplateID(), Sequencer.GetSharedPlaybackState());
 
-	// Respawn from the saved template, then key it.
-	Sequencer.RestorePreAnimatedState();
+	// Respawn the twin alone from the saved template, then key it, as Sequencer does after changing a spawnable's
+	// template (SequencerUtilities.cpp:5657-5661). RestorePreAnimatedState would destroy and respawn every spawnable in
+	// the shot, the whole scene (~0.2 s of MetaHuman re-initialisation on a production shot, measured 2026-10-06).
+	Sequencer.GetSpawnRegister().DestroySpawnedObject(Twin, Sequencer.GetFocusedTemplateID(), Sequencer.GetSharedPlaybackState());
 	Sequencer.ForceEvaluate();
 	const TArray<FFrameNumber> Times = KeyTimes(MovieScene, Bake.Samples);
 	WriteTransformKeys(MovieScene, Twin, Times, Bake.Samples);

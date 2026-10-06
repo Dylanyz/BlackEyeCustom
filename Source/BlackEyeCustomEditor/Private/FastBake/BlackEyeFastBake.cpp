@@ -35,7 +35,7 @@
 // Debugging switches, a bitmask, for bisecting a bake that disagrees with live playback. 0 in normal use.
 // 1 keep viewport camera cuts on | 2 don't force Constrain Aspect Ratio | 4 skip the subject mesh refresh
 // 8 evaluate without HasJumped | 16 freeze time at the first frame (tick the camera only)
-// 32 skip ticking the camera's own components after it
+// 32 skip ticking the camera's own components after it | 64 don't advance GFrameCounter per step
 static TAutoConsoleVariable<int32> CVarFastBakeDebug(
 	TEXT("BlackEyeCustom.FastBake.Debug"), 0,
 	TEXT("Bitmask to switch bake steps off when bisecting (see BlackEyeFastBake.cpp). 0 = normal."));
@@ -162,7 +162,9 @@ namespace BlackEyeFastBake
 	void Evaluate(ISequencer& Sequencer, const UMovieScene& MovieScene, FFrameTime DisplayTime)
 	{
 		const FFrameTime Tick = FFrameRate::TransformTime(DisplayTime, MovieScene.GetDisplayRate(), MovieScene.GetTickResolution());
-		FMovieSceneContext Context(FMovieSceneEvaluationRange(Tick, MovieScene.GetTickResolution()), Sequencer.GetPlaybackStatus());
+		// Always Stopped, whatever Sequencer is doing: a bake started during playback must not fire what Playing fires
+		// (anim notifies, audio), and must step the same way as one started while parked.
+		FMovieSceneContext Context(FMovieSceneEvaluationRange(Tick, MovieScene.GetTickResolution()), EMovieScenePlayerStatus::Stopped);
 		// Jumped, so every track evaluates its absolute state at this frame. Safe only because viewport camera
 		// cuts are off for the bake: with them on, a jump makes every frame a camera cut that snaps the camera [4.1].
 		Context.SetHasJumped((DebugFlags() & 8) == 0);
@@ -173,7 +175,9 @@ namespace BlackEyeFastBake
 	 * Runs the camera's own ticking components, in tick-group order, as a world tick would after the actor. A lens
 	 * component that corrects Black Eye's output must run: DynamicLens restores the focal length Black Eye shrinks
 	 * by the overscan factor on every LookAt tick, and without it focal collapses to 0 within a few hundred steps
-	 * (DESIGN trap 4.13). Black Eye's own components don't tick (bCanEverTick false), so they aren't stepped twice.
+	 * (DESIGN trap 4.13). Follow, LookAt and Black Eye's collider don't tick (bCanEverTick false), so they aren't stepped
+	 * twice. Black Eye's camera component does (inherited from UCameraComponent), but only to size its editor proxy mesh
+	 * and frustum (BlackEyeCineCameraComponent.cpp:62-86), which nothing samples.
 	 * BE-NATIVE: fixing the overscan feedback in FBlackEyeLookAtState::UpdateFrom (BlackEyeLookUtils.cpp ~L353)
 	 * removes the need for any component to run after Black Eye.
 	 */
@@ -380,6 +384,16 @@ FBlackEyeFastBakeReport BlackEyeFastBake::RunBake(ULevelSequence* Sequence, cons
 	// One step: put the world at Time, pose the subjects, then advance (or snap) the camera.
 	auto Step = [&](FFrameTime Time, int32 Frame, bool bSnap)
 	{
+		// Each step stands for one engine frame, so the frame counter advances as it would between editor ticks, the
+		// way the engine's own out-of-loop frames do it (CommandletHelpers::TickEngine, Commandlet.cpp:144;
+		// HighResScreenshotBeginFrame, UnrealClient.cpp:1604). Without it, per-frame work keyed on GFrameCounter runs
+		// once for the whole bake: an anim instance's native and Blueprint update (AnimInstanceProxy.cpp:1336), and
+		// Sequencer re-posing every animated mesh on every step because its pose was "already ticked this frame"
+		// (MovieSceneSkeletalAnimationSystem.cpp:710-723) [4.18].
+		if ((DebugFlags() & 64) == 0)
+		{
+			++GFrameCounter;
+		}
 		double T = FPlatformTime::Seconds();
 		Evaluate(*Sequencer, MovieScene, (DebugFlags() & 16) ? FFrameTime(WarmUpStart) : Time);
 		{
@@ -402,6 +416,10 @@ FBlackEyeFastBakeReport BlackEyeFastBake::RunBake(ULevelSequence* Sequence, cons
 			Restore.Camera = Camera;
 			Camera->SetActorTickEnabled(false);
 			Camera->GetCineCameraComponent()->bConstrainAspectRatio = true;
+			if (Camera->IsSelected())
+			{
+				GEditor->SelectActor(Camera, false, true); // [4.2], as at the start
+			}
 		}
 
 		T = FPlatformTime::Seconds();

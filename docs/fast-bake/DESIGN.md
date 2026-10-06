@@ -13,11 +13,11 @@ reproduced here; the files cited ship with each product's source.
 | [1. The problem and its root cause](#1-the-problem-and-its-root-cause) | confirmed from source |
 | [2. What already exists, and why none of it fits](#2-what-already-exists-and-why-none-of-it-fits) | confirmed from source |
 | [3. The algorithm](#3-the-algorithm) | built |
-| [4. Traps](#4-traps) | 4.11-4.17 measured; 4.1 and 4.4 confirmed; the rest from source and review |
+| [4. Traps](#4-traps) | 4.11-4.18 measured; 4.1 and 4.4 confirmed; the rest from source and review |
 | [5. Output: the baked twin, lock and unlock](#5-output-the-baked-twin-lock-and-unlock) | built, measured on a production edit |
 | [6. Entry points](#6-entry-points) | library and Sequencer menu built; Content Browser batch is P2 |
 | [7. What becomes trivial inside Black Eye](#7-what-becomes-trivial-inside-black-eye) | planned |
-| [8. Measured numbers](#8-measured-numbers) | measured on the repro and on a production angle (P0) |
+| [8. Measured numbers](#8-measured-numbers) | measured on the repro and on a production angle (P0); speed audit 2026-10-06 |
 | [9. Decisions and rejected ideas](#9-decisions-and-rejected-ideas) | live |
 | [10. Phases](#10-phases) | P0 done; P1 built, alignment closed (bake = playback), twin-tag fix installed and verified; P2 next |
 | [11. Open questions](#11-open-questions) | live |
@@ -103,7 +103,8 @@ Per angle-shot Level Sequence, per BEC binding:
    `SnapComponentsToTargetsNow` once, explicitly.
 4. **Step every frame** `f` in range, with `dt = 1/DisplayRate`, in `SubSteps` equal steps that land on `f`. The
    default is 1: one camera tick per frame, as a render at Temporal Sample Count 1 gets (trap 4.12).
-   1. Evaluate with HasJumped (at the sub-frame time), then constraints.
+   1. Advance `GFrameCounter` (each step is one engine frame, trap 4.18). Evaluate with HasJumped (at the sub-frame
+      time, status Stopped whatever Sequencer is doing), then constraints.
    2. Refresh only the **subject** skeletal meshes: those of each subject actor and of every actor up its attach
       chain (trap 4.14), parents first (trap 4.6). Re-place socket-attached children. Evaluate constraints again.
    3. `BEC->Tick(dt)`: the virtual `AActor::Tick`, whose BEC override runs Follow then LookAt. Then the camera
@@ -143,9 +144,9 @@ needs no symbol because `Tick` is virtual on `AActor`. Every name used is checke
 5. **Keep the slow task modal.** A mouse button held in the viewport changes LookAt.
 6. **Subject refresh order.** Body before Face: the MetaHuman Face copies the head from the Body. Disable URO on
    subjects for the bake.
-7. **Likely cost trap (unconfirmed).** `GFrameCounter` doesn't advance inside the loop, so the Sequencer skeletal
-   animation system may refresh *every* animated mesh on each evaluation
-   (`MovieSceneSkeletalAnimationSystem.cpp:711-721`). Profile in P0.
+7. **Cost trap: confirmed and fixed, see 4.18.** `GFrameCounter` doesn't advance inside the loop, so the Sequencer
+   skeletal animation system refreshes *every* animated mesh on each evaluation
+   (`MovieSceneSkeletalAnimationSystem.cpp:710-723`). P0 on the one-mesh repro didn't show it; a production shot did.
 8. **Undo.** Keep the evaluation loop outside the transaction: sample into arrays, then open one transaction just to
    write keys. Re-resolve subjects every frame, because spawnables re-spawn at section boundaries.
 9. **Keys.**
@@ -185,7 +186,8 @@ needs no symbol because `Tick` is virtual on `AActor`. Every name used is checke
     `BlackEyeLookUtils.cpp` `FBlackEyeLookAtState::UpdateFrom` ~L353), which DynamicLens's guard undoes after Black
     Eye in every world tick. Fix: after `Tick`, run the camera actor's tick-enabled components in tick-group order
     (`TickCameraComponents`). Control: with that switched off (`BlackEyeCustom.FastBake.Debug 32`) the collapse
-    returns. Black Eye's own components don't tick (`bCanEverTick` false), so nothing is stepped twice.
+    returns. Follow, LookAt and the collider don't tick (`bCanEverTick` false), so nothing is stepped twice. Black Eye's
+    camera component does tick (inherited), but only to size its editor proxy mesh (`BlackEyeCineCameraComponent.cpp:61-85`).
 14. **Measured: subjects are often trackers attached to a character's bone.** A LookAt subject was a `TargetPoint`
     attached to a MetaHuman Face's `FACIAL_L_Eye` socket; its own actor has no skeletal mesh. The meshes to pose are
     those of every actor up the subject's attach chain, and socket-attached children must be re-placed after the pose
@@ -226,6 +228,19 @@ needs no symbol because `Tick` is virtual on `AActor`. Every name used is checke
     Fix (built 2026-10-06, `FindTwins`): the twin is the newest tagged ID whose binding exists, the rest are stale. A
     bake retags so the tag names only its twin and moves cuts off stale twins; lock and unlock move cuts on stale twins
     too; with no camera named, a cut on a twin maps back to its Black Eye camera (bake and realtime record alike).
+18. **Measured: the frame counter must advance every step (trap 4.7, confirmed and fixed).** The whole bake runs inside
+    one engine frame, so `GFrameCounter` stood still. Two things key on it:
+    - Sequencer re-poses a skeletal mesh during evaluation when its pose was "already ticked this frame"
+      (`MovieSceneSkeletalAnimationSystem.cpp:710-723`, `PoseTickedThisFrame`, `SkeletalMeshComponent.cpp:4456`).
+      Sequencer's own re-pose stamps the frame again, so from the second step on, **every** Sequencer-animated mesh in
+      the shot (not only the subjects) was fully re-posed on every step: 1.6 of 3.7 ms per frame on a production shot
+      (Insights, 2026-10-06), and the subjects were posed twice.
+    - An anim instance's native and Blueprint update runs once per frame counter (`AnimInstanceProxy.cpp:1336-1373`),
+      so from the second step on it never ran: any AnimBP logic in its update was frozen for the whole bake.
+    Fix: `++GFrameCounter` at the start of each step, as the engine does wherever it simulates a frame outside the main
+    loop (`CommandletHelpers::TickEngine`, `Commandlet.cpp:144`; `HighResScreenshotBeginFrame`, `UnrealClient.cpp:1604`;
+    `DefaultGameMoviePlayer.cpp:538`). Neither Sequencer's runtime nor Black Eye 2.0.7 reads `GFrameCounter`.
+    `BlackEyeCustom.FastBake.Debug 64` switches it off for comparison.
 
 ## 5. Output: the baked twin, lock and unlock
 
@@ -243,7 +258,15 @@ again by a binding tag (`BlackEyeFastBake_<BEC guid>`).
   components a user or Blueprint added (DynamicLens). Focus method forced to Manual. Camera component at identity.
 - **Measured trap:** a component added to a spawnable template by hand does not survive spawning. The twin is edited
   as its spawned instance and saved with `FMovieSceneSpawnRegister::SaveDefaultSpawnableState` (Sequencer's own
-  "Save Default State"); then it does. **Also:** DynamicLens's helper adds its component with `AddInstanceComponent`
+  "Save Default State"); then it does. The twin alone is then respawned from the saved template
+  (`FMovieSceneSpawnRegister::DestroySpawnedObject` + `ForceEvaluate`, Sequencer's own pattern,
+  `SequencerUtilities.cpp:5657-5661`). **Changed 2026-10-06:** this used `RestorePreAnimatedState`, which destroys and
+  respawns every spawnable in the shot (`MovieScenePreAnimatedStateExtension.cpp:355-410`): about 0.2 s of MetaHuman
+  re-initialisation per bake on a production shot.
+- The twin is written at the first baked frame, with the playhead put back afterwards. Before 2026-10-06 it was
+  written wherever the user had left the playhead; outside the shot neither camera is spawned, and the write failed
+  after the twin binding had been created and tagged. Cancelling a transaction doesn't revert what it changed
+  (`UTransBuffer::Cancel`, `EditorTransaction.cpp:1411-1453`), so the spawn check now runs before the transaction opens. **Also:** DynamicLens's helper adds its component with `AddInstanceComponent`
   but leaves `CreationMethod` at Native, so components are taken from the instance list too.
 - DynamicLens on the twin is safe: its focal writes (kit snap, locked focal, clamp to the measured range) are
   idempotent, and its overscan guard has no feedback to undo on a plain CineCamera. Measured: twin and live camera
@@ -290,7 +313,9 @@ Not built yet: re-sync settings without re-baking (P2); keeping the previous bak
   **Second measured crash (2026-10-06), fixed:** the bake opened the shot as a new root Sequencer and wrote the twin in
   the same tick; that Sequencer had no track editors yet ("Unable to find a track editor for track type
   MovieSceneFloatTrack") and asserted when the bake's transaction closed. Now a sequence opened for a bake gets half a
-  second to settle first (`SequencerSettleSeconds`), the view restore does the same, and `BakeShot` from Python refuses
+  second **and three frames** to settle first (`SequencerSettleSeconds`, `SequencerSettleFrames`; frames added
+  2026-10-06, because a ticker delay is measured in delta time, `Ticker.cpp:16, 114`, and the long frame in which a
+  big shot first spawns satisfied it after a single frame), the view restore does the same, and `BakeShot` from Python refuses
   (opens it, asks to run again) rather than editing a sequence opened in the same call. `BlackEyeCustom.FastBake.Bake
   <binding>` runs the menu's Bake and lock from the console; it replayed the crash case cleanly.
 - **Content Browser:** right-click shot Level Sequence(s) ▸ Bake Black Eye cameras, in batch (all angles at once).
@@ -374,6 +399,25 @@ Correctness on this rig: live playback is **not repeatable**. Two realtime runs 
 bake differs from those two runs by 0.45 cm / 0.17 deg and 5.9 cm / 6.0 deg mean, so it lies within live playback's
 own spread, and it repeats (trap 4.15). Locking a bake is the only way this shot plays the same way twice.
 
+**Speed and stability audit** (2026-10-06): the same production angle's short test duplicate (one MetaHuman subject
+tracked on the eye, Follow on the pelvis, 5 subject meshes refreshed), 1 tick per frame, profiled with Unreal Insights
+(`Trace.File ... cpu`, exported headless with `UnrealInsights -ExecOnAnalysisCompleteCmd="TimingInsights.ExportTimingEvents ..."`).
+Before, per frame: Sequencer evaluation 2.8 ms, of which 1.6 ms was Sequencer re-posing every animated mesh (trap
+4.18) and 0.9 ms its editor recompile check (section 9); subject refresh 0.4 ms; camera 0.1 ms. With the frame counter
+advancing (A/B in one build, `BlackEyeCustom.FastBake.Debug 64` = before, one editor call per bake):
+
+| Range | Before | After |
+|---|---|---|
+| 134 frames (the shot) | 3.37-3.49 ms/frame, 9.6-9.9x realtime | 2.08-2.18 ms/frame, 15.3-16.0x |
+| 1,800 frames (1 min) | 2.82-2.99 ms/frame, 11.1-11.8x | 1.54 ms/frame, **21.7x** |
+| Bake and write the twin (134 frames) | 0.81 s | 0.59 s (write 0.35 → 0.30 s) |
+
+Output unchanged: before vs after, camera 0.001 cm / 0.02 deg (run-to-run noise), subject points identical; both match a
+realtime record of the shot to 0.26 cm / 0.04 deg mean. What remains per frame: the recompile check (0.9 ms,
+Epic-side), the subject refresh (0.5 ms), the rest of evaluation (0.3 ms). The write's remaining cost is the shot's
+spawnables re-initialising when the playhead moves between the user's frame and the shot (MetaHuman RigLogic and
+Control Rig, ~0.15 s).
+
 ## 9. Decisions and rejected ideas
 
 - **Extension, not a fork of Black Eye** (2026-10-06). Everything the bake needs is reachable from outside: `Tick` is
@@ -391,6 +435,18 @@ own spread, and it repeats (trap 4.15). Locking a bake is the only way this shot
   (§2).
 - **Rejected: a Python bake.** Python can't step a BEC (§2).
 - **Rejected: a headless batch.** LookAt needs a live viewport (trap 4.4).
+- **Rejected (2026-10-06): skipping Sequencer's per-evaluation recompile check.** On a production shot,
+  `FMovieSceneEntitySystemRunner::GameThread_ConditionalRecompile` costs about 0.9 ms of every evaluation: in the
+  editor every sequence is volatile, and the check re-reads the signature of every sub-sequence
+  (`MovieSceneCompiledVolatilityManager.cpp:100-146`, `MovieSceneCompiledDataManager.cpp:806-838`). Epic's switch,
+  `Sequencer.VolatileSequencesInEditor 0`, is read only when a sequence instance is created, and switching it off for
+  the Sequencer session would stop edits from recompiling. The runner's `SkipFlushState` is internal. Not worth it from
+  outside; Epic-side.
+- **Rejected (2026-10-06): a delayed progress dialog** (`FScopedSlowTask::MakeDialogDelayed`). It would save the
+  ~70 ms of opening the dialog on short bakes, but the dialog is what keeps input away from the viewport whose mouse
+  state Follow and LookAt read every tick (trap 4.5; `KeyState` reads in `BlackEyeFollowComponentBase.cpp:92-140`,
+  `BlackEyeLookAtComponent.cpp:404-470`), and Slate is ticked from inside the loop every 0.2 s
+  (`FeedbackContext.cpp:184-197`, `FeedbackContextEditor.cpp:419-438`).
 - **Speed fallback: a shared subject pass** (moves into P1 if P0 measures under 10× realtime).
   1. Evaluate the scene once and cache tracker and Follow-target world transforms per frame.
   2. Per angle, mute the scene, drive the targets from the cache, evaluate only the camera's own tracks, then tick.
@@ -436,7 +492,9 @@ showing the jolt and the fix in about two minutes. No MetaHumans, no project con
   task (P0). A Slate menu entry point is untested.
 - Which tick rate should be the default: render-faithful (`SubSteps` = the render's Temporal Sample Count) or
   viewport-faithful (what the user saw while tweaking)? Default 1, render-faithful (trap 4.12).
-- Support the Anim Mixer path, or refuse to bake when a subject uses it (trap 4.11)?
+- Support the Anim Mixer path, or refuse to bake when a subject uses it (trap 4.11)? Hypothesis, untested: the frozen
+  pose was the frozen frame counter (trap 4.18), since the anim instance's update ran only on the first step. Re-test
+  in the tester project without `-DisablePlugins` now that each step advances it.
 - Does a MetaHuman face (a tracker on `Face/FACIAL_L_Eye`) need its post-process AnimBP ticked to move the eye bone?
   Check that the eye bone matches between normal playback and the bake.
 - Link `Black_Eye` or not (§9).

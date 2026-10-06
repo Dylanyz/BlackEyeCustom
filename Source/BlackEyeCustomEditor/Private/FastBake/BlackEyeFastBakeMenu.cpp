@@ -102,8 +102,10 @@ namespace BlackEyeFastBake
 	// A Sequencer opened this tick isn't ready to be edited: its track editors and tree are set up over the next
 	// frames, and editing its sequence in the same tick crashed (Sequencer asserted while the bake's transaction closed,
 	// after "Unable to find a track editor for track type MovieSceneFloatTrack", 2026-10-06). So any step that follows
-	// opening a sequence waits this long.
-	constexpr float SequencerSettleSeconds = 0.5f;
+	// opening a sequence waits this long AND this many frames: a ticker delay alone is measured in delta time
+	// (Ticker.cpp:16, 114), so the long frame in which a big shot first spawns satisfies it after a single frame.
+	constexpr double SequencerSettleSeconds = 0.5;
+	constexpr int32 SequencerSettleFrames = 3;
 
 	/** Opens a sequence as Sequencer's root, then runs Then once that Sequencer has settled. */
 	void OpenThen(ULevelSequence* Sequence, TFunction<void()> Then)
@@ -113,7 +115,17 @@ namespace BlackEyeFastBake
 		{
 			AssetEditors->OpenEditorForAsset(Sequence);
 		}
-		RunLater(MoveTemp(Then), SequencerSettleSeconds);
+		const double Start = FPlatformTime::Seconds();
+		FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateLambda(
+			[Then = MoveTemp(Then), Start, Frames = 0](float) mutable
+			{
+				if (++Frames < SequencerSettleFrames || FPlatformTime::Seconds() - Start < SequencerSettleSeconds)
+				{
+					return true; // keep waiting
+				}
+				Then();
+				return false;
+			}));
 	}
 
 	/** Re-opens the sequence the user was in and focuses back into the shot, if the bake had to open the shot alone. */
