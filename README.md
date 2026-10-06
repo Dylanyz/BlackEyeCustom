@@ -12,7 +12,7 @@ own way inside Black Eye. It is an extension, not a fork: no Black Eye code is c
 
 | Extension | What it fixes | Status | Design |
 |---|---|---|---|
-| **Fast Bake** | Black Eye cameras jolt into frame at every cut when an edit is played in the editor, because their damping runs on wall-clock ticks, not the playhead. Fast Bake solves each camera offline, faster than realtime, into keys on a plain CineCamera that you can lock in and unlock. | design done, P0 spike next | [docs/fast-bake/DESIGN.md](docs/fast-bake/DESIGN.md) |
+| **Fast Bake** | Black Eye cameras jolt into frame at every cut when an edit is played in the editor, because their damping runs on wall-clock ticks, not the playhead. Fast Bake solves each camera offline, faster than realtime, into keys on a plain CineCamera that you can lock in and unlock. | P0 spike works: 90-124x realtime on the repro, matches live playback; keys, lock/unlock next (P1) | [docs/fast-bake/DESIGN.md](docs/fast-bake/DESIGN.md) |
 
 ## For the Black Eye team
 
@@ -26,6 +26,17 @@ Three places give the whole picture:
 3. **`Source/BlackEyeCustomEditor/Public/BlackEyeContract.h`**: every Black Eye class, function and property this
    plugin uses. It reaches Black Eye through reflection rather than linking it, so this one file is the whole
    dependency surface. The `BlackEyeCustom.SelfTest` console command checks each entry.
+
+## Reproduce Fast Bake
+
+1. In any UE 5.8 project with Black Eye and this plugin enabled, run `Tools/fast_bake_repro.py` in the editor
+   (`py "<path>/fast_bake_repro.py"`, add `--mesh`/`--anim` if the Third Person mannequin is elsewhere). It builds a
+   level and a 300-frame shot with a walking mannequin and one spawnable Black Eye camera.
+2. Bake from Python:
+   `unreal.BlackEyeFastBakeLibrary.bake_camera_to_csv(unreal.load_asset("/Game/FastBakeRepro/LS_FastBakeRepro_A"), options)`
+   with `options = unreal.BlackEyeFastBakeOptions()` and `options.csv_path` set.
+3. For a live reference: `start_realtime_record(seq, "")`, play the sequence, then `stop_realtime_record(csv_path)`.
+4. `python Tools/compare_bake.py <realtime.csv> <bake.csv>` prints the differences (`docs/fast-bake/DESIGN.md` section 8).
 
 ## Requirements
 

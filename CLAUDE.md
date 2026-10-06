@@ -41,12 +41,21 @@ the plugin (Edit ▸ Plugins), or pass `-EnablePlugins=BlackEyeCustom`. Headless
 then grep the output for `[BlackEyeCustom]`. The commandlet's own exit code reflects unrelated project load errors;
 judge by the `PASSED` line. (Verified 2026-10-06.)
 
+**Testing Fast Bake** (tester project, repro at `/Game/Claude/FastBake/`): launch the tester with
+`-DisablePlugins=MetaHumanCrowdContent,MovieSceneAnimMixer` or every subject freezes (DESIGN trap 4.11). Bake and
+record from Python (README "Reproduce"); `BlackEyeCustom.FastBake.Verbose 1` logs each subject mesh's anim state.
+Realtime records need "Use Less CPU when in Background" off (`bThrottleCPUWhenNotForeground` on
+`/Script/UnrealEd.Default__EditorPerformanceSettings`), and the bake must use `SubSteps` = editor fps / sequence fps
+to match one (trap 4.12).
+
 ## Layout
 
 | Path | What |
 |---|---|
 | `BlackEyeCustom.uplugin` | one `Editor` module, Win64, `Installed: true`, no Black Eye dependency |
 | `Source/BlackEyeCustomEditor/` | `BlackEyeContract` (every Black Eye name + `RunSelfTest`), module + console command. Each extension adds a `Private/<Extension>/` folder |
+| `Source/.../Private/FastBake/`, `Public/BlackEyeFastBakeLibrary.h` | the bake loop and its Python/Blueprint entry points (`BakeCameraToCsv`, `Start/StopRealtimeRecord`) |
+| `Tools/fast_bake_repro.py`, `Tools/compare_bake.py` | builds the repro scene in any project; compares baked vs realtime tracks (plain Python) |
 | `docs/<extension>/DESIGN.md` | one living design doc per extension; `docs/<extension>/data/` for measurements |
 | `Tools/` | `build_blackeyecustom.ps1` (package `%TEMP%\bcb`), `install_junction.ps1` |
 

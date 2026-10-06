@@ -11,14 +11,14 @@ reproduced here; the files cited ship with each product's source.
 |---|---|
 | [1. The problem and its root cause](#1-the-problem-and-its-root-cause) | confirmed from source |
 | [2. What already exists, and why none of it fits](#2-what-already-exists-and-why-none-of-it-fits) | confirmed from source |
-| [3. The algorithm](#3-the-algorithm) | planned |
-| [4. Traps](#4-traps) | from source and review; unmeasured |
+| [3. The algorithm](#3-the-algorithm) | built (P0: samples to CSV; keys are P1) |
+| [4. Traps](#4-traps) | 4.11 and 4.12 measured in P0; 4.1 and 4.4 confirmed; the rest from source and review |
 | [5. Output: the baked twin, lock and unlock](#5-output-the-baked-twin-lock-and-unlock) | planned |
 | [6. Entry points](#6-entry-points) | planned |
 | [7. What becomes trivial inside Black Eye](#7-what-becomes-trivial-inside-black-eye) | planned |
-| [8. Measured numbers](#8-measured-numbers) | not yet measured |
+| [8. Measured numbers](#8-measured-numbers) | measured on the repro (P0); a production angle pending |
 | [9. Decisions and rejected ideas](#9-decisions-and-rejected-ideas) | live |
-| [10. Phases](#10-phases) | P0 next |
+| [10. Phases](#10-phases) | P0 done on the repro; P1 next |
 | [11. Open questions](#11-open-questions) | live |
 | [12. Verification](#12-verification) | planned |
 
@@ -85,7 +85,8 @@ angle: about 30 minutes per angle, times ten angles a scene. That is the number 
 
 ## 3. The algorithm
 
-*Status: planned.*
+*Status: built as the P0 spike (`Source/BlackEyeCustomEditor/Private/FastBake/BlackEyeFastBake.cpp`,
+`UBlackEyeFastBakeLibrary::BakeCameraToCsv`). It samples to CSV; writing keys onto the twin (step 5) is P1.*
 
 Per angle-shot Level Sequence, per BEC binding:
 
@@ -98,8 +99,9 @@ Per angle-shot Level Sequence, per BEC binding:
    - Deselect BECs (trap 4.2).
 3. **Warm up.** At range start minus N frames (default 0 for a full-range bake), evaluate, then call
    `SnapComponentsToTargetsNow` once, explicitly.
-4. **Step every frame** `f` in range, with `dt = 1/DisplayRate`:
-   1. Evaluate with HasJumped, then constraints.
+4. **Step every frame** `f` in range, with `dt = 1/DisplayRate`, in `SubSteps` equal steps that land on `f`. The
+   default is 1: one camera tick per frame, as a render at Temporal Sample Count 1 gets (trap 4.12).
+   1. Evaluate with HasJumped (at the sub-frame time), then constraints.
    2. Refresh only the **subject** skeletal meshes (those the LookAt / Follow / Focus targets attach to, plus their
       leader and follower meshes), in leader-first order (trap 4.6). Evaluate constraints again.
    3. `BEC->Tick(dt)`: the virtual `AActor::Tick`, whose BEC override runs Follow then LookAt.
@@ -152,6 +154,27 @@ needs no symbol because `Tick` is virtual on `AActor`. Every name used is checke
    - Copy Filmback, LensSettings clamps, Crop and Overscan exactly; `FocusMethod=Manual`.
 10. **Velocity look-ahead is Play-only** (enabled in `BeginPlay`), so an editor bake matches editor playback, not
     PIE.
+11. **Measured: Sequencer's experimental Anim Mixer freezes subjects in the bake.** When the `MovieSceneAnimMixer`
+    plugin is loaded (pulled in as a dependency, for example by `MetaHumanCrowdContent`), skeletal animation sections
+    drive a `SequencerMixedAnimInstance`. The manual refresh in step 4.2 then returns the same pose every frame (the
+    head bone's z constant to 0.01 cm over 300 frames), while live playback animates. The legacy path
+    (`AnimSequencerInstance`) animates correctly. The bake would aim at a frozen subject, and the "camera moved" check
+    can't catch it. P0 ran with `-DisablePlugins=MetaHumanCrowdContent,MovieSceneAnimMixer`. P1: find how the mixer's
+    task gets its pose (`MovieSceneAnimInstanceTargetSystem.cpp:143-232` and 480-560), or refuse to bake while a
+    subject uses the mixer. `BlackEyeCustom.FastBake.Verbose 1` logs each mesh's anim instance.
+12. **Measured: a Black Eye camera's result depends on its tick rate, not only on time.** The same shot baked at 1, 2,
+    4 and 8 camera ticks per frame gives four different tracks. At 4 ticks per frame (the editor viewport's ~120 fps
+    on a 30 fps sequence) the bake matches realtime playback within realtime's own run-to-run noise. At 1 tick per
+    frame it differs by up to 2.6 cm and 1.06 degrees on a slow turn (section 8). `ExponentialSmoothingApprox` is
+    step-size independent to about 1e-4 per frame, so the damping curve isn't the cause. Hypothesis (from source, not
+    isolated): the LookAt step damps toward a point projected onto an "outer sphere" around the current aim
+    (`BlackEyeLookUtils.cpp:520-556`), which depends on the current rotation, so fewer, larger ticks settle elsewhere.
+    Consequences:
+    - Editor playback, a render and the bake can frame a shot slightly differently, from frame rate alone.
+    - A render ticks once per temporal sample (inferred, not measured here), so `SubSteps` should equal the render's
+      Temporal Sample Count to match it. Default 1.
+    - BE-NATIVE: a frame-rate-independent LookAt/Follow step (or internal sub-stepping at a fixed rate) would make
+      editor, render and bake agree.
 
 ## 5. Output: the baked twin, lock and unlock
 
@@ -186,6 +209,9 @@ same shot, named `<BEC label>_Bake`.
 
 *Status: planned; grows as workarounds are written. `grep -rn BE-NATIVE Source/` is the port checklist.*
 
+- **A frame-rate-independent LookAt/Follow step** (trap 4.12): editor playback, renders and bakes would then agree
+  on framing at any tick rate.
+
 - **A public step-camera function** (`StepCamera(dt)`), so a baker never needs the whole actor tick, tick disabling,
   or reflection.
 - **A correct editor camera-cut snap**: fire `NotifyCameraCut` in the editor on every straight cut and on cuts back
@@ -195,17 +221,43 @@ same shot, named `<BEC label>_Bake`.
 
 ## 8. Measured numbers
 
-*Status: not yet measured. Raw data goes in `docs/fast-bake/data/` as small CSVs and plots.*
+*Status: measured 2026-10-06 on the repro (`Tools/fast_bake_repro.py`: one walking mannequin, one BEC with Follow
+and a head-bone LookAt, 300 frames at 30 fps), UE 5.8.2, Black Eye 2.0.7, Ryzen 9 9950X3D. Raw tracks and a yaw plot
+are in `data/`; `Tools/compare_bake.py` reproduces every number below. A production angle (many meshes, MetaHumans)
+is still to measure.*
 
-| Measure | Value | Date |
+**Speed** (1 tick per frame, subject meshes only; the scene has one skeletal mesh):
+
+| Measure | Value |
+|---|---|
+| Total per frame | 0.27-0.39 ms |
+| Sequencer evaluation | 0.02-0.10 ms |
+| Subject mesh refresh (1 mesh) | 0.07-0.17 ms |
+| Camera tick | 0.01 ms |
+| Speed | **90-124x realtime** (300 frames in 0.08-0.12 s) |
+| Each extra sub-step | about +0.3 ms/frame (4 sub-steps: 1.0 ms/frame, 34x) |
+
+The reviewer had estimated about 10 ms/frame (4x). Go/no-go was 10x realtime: **go** on the repro. The shared
+subject pass (section 9) stays parked until a production angle is measured. Trap 4.7 (`GFrameCounter`) did not show
+up as a cost: Sequencer's skeletal system never force-refreshed a mesh inside the loop (`PoseTickedThisFrame` stayed
+false).
+
+**Correctness.** The reference is a realtime record of the same shot: editor playback at about 120 fps (about 4
+ticks per frame), with the camera sampled after every world tick (`StartRealtimeRecord`) and interpolated to each
+baked frame.
+
+| Track vs realtime playback | Position mean / max | Rotation mean / max |
 |---|---|---|
-| ms/frame, whole-assembly evaluation | — | |
-| ms/frame, subject-mesh refresh only | — | |
-| Speed vs realtime, one 300-frame range | — | |
-| Bake vs realtime `LinkedCamera` record (max transform / focal error) | — | |
-| One full 30-minute angle, total | — | |
+| Realtime run 2 vs run 1 (noise floor) | 0.005 / 0.078 cm | 0.009 / 0.161 deg |
+| Bake, 1 tick per frame | 1.815 / 2.552 cm | 0.269 / 1.064 deg |
+| Bake, 2 ticks per frame | 0.616 / 0.888 cm | 0.077 / 0.167 deg |
+| **Bake, 4 ticks per frame** | **0.085 / 0.324 cm** | **0.009 / 0.129 deg** |
+| Bake, 8 ticks per frame | 0.315 / 0.575 cm | 0.041 / 0.137 deg |
+| Subject head bone, bake vs realtime | 0.00-0.10 cm | |
 
-An unmeasured reviewer estimate: a naive per-angle pass costs about 10 ms/frame, about 4× realtime.
+Once the tick rate matches (4 ticks, about the viewport's 120 fps), the bake reproduces live Black Eye to realtime's
+own noise, damping included: realtime playback never snaps mid-shot. The 1-tick differences are trap 4.12, not a bake
+error. Focal length was constant in this shot (no Dynamic FoV), so focal keys are untested.
 
 ## 9. Decisions and rejected ideas
 
@@ -231,7 +283,11 @@ An unmeasured reviewer estimate: a naive per-angle pass costs about 10 ms/frame,
 
 ## 10. Phases
 
-- **P0 spike** (one session): a minimal C++ bake of one real angle over a 300-frame range.
+- **P0 spike:** *done 2026-10-06 on the repro, not yet on a production angle.* Results in section 8, new traps
+  4.11 and 4.12. Answered: tick-disable plus manual `Tick` works; tracker and bone targets update inside the blocking
+  loop (legacy anim path only, 4.11); damping survives with camera cuts off; LookAt sees a valid viewport inside a
+  blocking loop driven from Python under a modal slow task. Still open: a production angle's ms/frame, and a
+  `LinkedCamera` Take Recorder comparison (the realtime record above replaced it as the reference). The original list:
   - Measure ms/frame, whole-assembly evaluation vs subject-mesh refresh; profile which meshes refresh per evaluation.
   - Check the tick-disable plus manual `Tick` path, and that tracker/bone targets update inside the blocking loop.
   - Confirm damping survives with the camera-cut handler disabled.
@@ -252,7 +308,11 @@ showing the jolt and the fix in about two minutes. No MetaHumans, no project con
 
 - Does the twin play correctly when an edit nests the shots? Test on a short edit with a few cuts first, then a full
   master sequence. The primary goal is batch-baking every shot at full extent; edit-aware partial bakes wait for P3.
-- Does `TickLookAt` see a valid viewport inside a blocking loop driven from a Slate menu? Verify in P0.
+- ~~Does `TickLookAt` see a valid viewport inside a blocking loop?~~ Yes when driven from Python under a modal slow
+  task (P0). A Slate menu entry point is untested.
+- Which tick rate should be the default: render-faithful (`SubSteps` = the render's Temporal Sample Count) or
+  viewport-faithful (what the user saw while tweaking)? Default 1, render-faithful (trap 4.12).
+- Support the Anim Mixer path, or refuse to bake when a subject uses it (trap 4.11)?
 - Does a MetaHuman face (a tracker on `Face/FACIAL_L_Eye`) need its post-process AnimBP ticked to move the eye bone?
   Check that the eye bone matches between normal playback and the bake.
 - Link `Black_Eye` or not (§9).

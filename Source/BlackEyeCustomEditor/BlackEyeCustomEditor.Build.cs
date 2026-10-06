@@ -24,7 +24,12 @@ public class BlackEyeCustomEditor : ModuleRules
 			new string[]
 			{
 				"CinematicCamera",
+				"Constraints",
+				"LevelSequence",
+				"LevelSequenceEditor",
+				"MovieScene",
 				"Projects",
+				"Sequencer",
 				"UnrealEd",
 			}
 		);

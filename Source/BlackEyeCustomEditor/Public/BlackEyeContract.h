@@ -33,6 +33,26 @@ namespace BlackEyeContract
 	/** True for any Black Eye camera actor. */
 	BLACKEYECUSTOMEDITOR_API bool IsBlackEyeCamera(const AActor* Actor);
 
+	/**
+	 * Calls SnapComponentsToTargetsNow (a BlueprintCallable UFUNCTION) on a Black Eye camera. False if it isn't one.
+	 * BE-NATIVE: a direct call (BlackEyeCineCameraActorBase.h:78).
+	 */
+	BLACKEYECUSTOMEDITOR_API bool SnapNow(AActor* Camera);
+
+	/**
+	 * Every actor named as a subject by the camera's Follow and LookAt components: the `Actor` of each
+	 * FBlackEyeSimpleTarget-derived property (LookAt Target_0..11, Follow Target_0..5). Unset or unloaded ones are skipped.
+	 * BE-NATIVE: the components already resolve these every tick (BlackEyeLookUtils.cpp:295-310).
+	 */
+	BLACKEYECUSTOMEDITOR_API void GetSubjectActors(const AActor* Camera, TArray<AActor*>& OutActors);
+
+	/**
+	 * World position of the LookAt component's first subject (Target_0): its bone or socket when one is named, else the
+	 * actor. For checking that a bake saw the same subject pose as live playback. False when unset.
+	 * BE-NATIVE: the look state already resolves this point (BlackEyeLookUtils.cpp:295-310).
+	 */
+	BLACKEYECUSTOMEDITOR_API bool GetFirstLookAtSubjectPoint(const AActor* Camera, FVector& OutWorld);
+
 	/** VersionName from Black_Eye.uplugin; empty when the plugin is not enabled. */
 	BLACKEYECUSTOMEDITOR_API FString GetInstalledVersion();
 
