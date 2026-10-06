@@ -1,4 +1,5 @@
-<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!-- Copyright (c) 2026 Dylan Gitalis. Source-available under CPAL-1.0 with the Commons Clause; see LICENSE.
+     SPDX-License-Identifier: CPAL-1.0 AND LicenseRef-Commons-Clause-1.0 -->
 # Black Eye Custom
 
 Editor extensions for the [Black Eye](https://www.youtube.com/@BlackEyeTechnologies) camera plugin for Unreal
@@ -78,7 +79,12 @@ Needs Visual Studio's C++ toolchain and the .NET Framework 4.8 SDK.
 
 ## License
 
-Apache-2.0. See `LICENSE` and `NOTICE`; `NOTICE` must travel with any redistribution.
+Source-available under CPAL-1.0 with the Commons Clause, the same as Dylan Gitalis's other Unreal plugins. See
+`LICENSE` and `NOTICE`. In short, anyone may use it for anything, monetized films included, and modify it privately.
+Anyone who distributes it keeps the source open and the credit visible. No one may sell it.
+
+**Black Eye Technologies** has a separate permission in `LICENSE` to build any of this into its own products, paid
+ones included, with none of those conditions. Credit is welcome but not required. The permission is theirs alone.
 
 Black Eye is a product of Black Eye Technologies. This repository contains none of its source; it cites files and
 line numbers that Black Eye licensees can read in their own install.
