@@ -18,7 +18,7 @@ reproduced here; the files cited ship with each product's source.
 | [7. What becomes trivial inside Black Eye](#7-what-becomes-trivial-inside-black-eye) | planned |
 | [8. Measured numbers](#8-measured-numbers) | measured on the repro and on a production angle (P0) |
 | [9. Decisions and rejected ideas](#9-decisions-and-rejected-ideas) | live |
-| [10. Phases](#10-phases) | P0 done; P1 built, alignment checked against playback, twin-tag fix awaiting install (`.claude/refs/status.md`); P2 next |
+| [10. Phases](#10-phases) | P0 done; P1 built, alignment closed (bake = playback), twin-tag fix installed and verified; P2 next |
 | [11. Open questions](#11-open-questions) | live |
 | [12. Verification](#12-verification) | planned |
 
@@ -201,7 +201,7 @@ needs no symbol because `Tick` is virtual on `AActor`. Every name used is checke
     Follow target a second in; with settling the first frame is within 13 cm of the parked live camera.
 16. **Comparing a twin with a parked live camera is not the test.** Parked, a live Black Eye camera keeps ticking until
     it has fully caught up with its subject; during playback it lags by its damping. Measured: a subject whose pelvis
-    popped 76 cm four frames into a shot (an animation discontinuity) left the twin gliding ~70 cm over about a second
+    popped 76 cm in one frame, about a second into a shot, where its mocap take changed (re-measured frame by frame) left the twin gliding ~70 cm over about a second
     (Follow damping 1 s), while the parked live camera sat on the new target, 40-55 cm "closer". The bake is right; the
     reference is playback or a render. Pops in the subject show up as camera glides in both.
     **Measured against playback (2026-10-06):** the same 134-frame production shot, live camera parked 10 s on the
@@ -412,10 +412,13 @@ own spread, and it repeats (trap 4.15). Locking a bake is the only way this shot
 - **P1 MVP:** *done 2026-10-06.* Repro script; `BE-NATIVE` tags; README section; bake into the twin (full range
   or a frame range with warm-up); lock/unlock; binding menu and library; non-Black-Eye components (DynamicLens);
   cancel/progress; undo. Full-range bakes of three production angles: 87k frames in 3.8 min (12-24x realtime).
-- **Alignment (2026-10-06):** Dylan reported the twin didn't line up with the live camera (it sat further back).
-  Against *playback* the twin matches to 1.1 cm / 0.1 deg (trap 4.16). Two causes remain: a parked live camera has
-  caught up with its subject while playback lags by its damping (4.16), and re-bakes of a locked shot kept playing an
-  older twin (4.17, fix built, not yet installed or verified).
+- **Alignment: closed (2026-10-06).** Dylan reported the twin didn't line up with the live camera (it sat further
+  back). Two causes: re-bakes of a locked shot kept playing an older twin (4.17, fixed: after the fix a re-bake left one
+  twin, one tag ID, locked, with its bake info), and a live camera seen while stepping frames has caught up with its
+  subject, while playback and the bake lag by the Follow damping (4.16). The visible gap came from a 76 cm subject pop
+  at a mocap take change. Against playback the re-baked twin matches to 0.6 cm. Decision (Dylan): the bake keeps
+  matching live Black Eye playback. Considered and not built: an option to re-snap the camera when a Follow target
+  jumps more than a threshold in one frame (it would match the stepped view, not playback).
 - **P2 batch and UX:** Content Browser batch over a shots folder; bake info (date, range, BEC parameter hash); a stale
   flag when BEC tracks or subject sections change (reusing AutoBake's track-signature idea); re-sync settings.
 - **P3 speed** (only if P0 numbers need it): edit-aware partial bakes (only the ranges each shot is cut into, plus
