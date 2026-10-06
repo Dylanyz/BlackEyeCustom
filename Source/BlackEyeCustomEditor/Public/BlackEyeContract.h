@@ -47,11 +47,12 @@ namespace BlackEyeContract
 	BLACKEYECUSTOMEDITOR_API void GetSubjectActors(const AActor* Camera, TArray<AActor*>& OutActors);
 
 	/**
-	 * World position of the LookAt component's first subject (Target_0): its bone or socket when one is named, else the
-	 * actor. For checking that a bake saw the same subject pose as live playback. False when unset.
-	 * BE-NATIVE: the look state already resolves this point (BlackEyeLookUtils.cpp:295-310).
+	 * World position of the first subject (Target_0) of the camera's LookAt (bLookAt) or Follow component: its bone or
+	 * socket when one is named, else the actor. For checking that a bake saw the same subject pose as live playback.
+	 * False when unset.
+	 * BE-NATIVE: the look and follow states already resolve this point (BlackEyeLookUtils.cpp:295-310).
 	 */
-	BLACKEYECUSTOMEDITOR_API bool GetFirstLookAtSubjectPoint(const AActor* Camera, FVector& OutWorld);
+	BLACKEYECUSTOMEDITOR_API bool GetFirstSubjectPoint(const AActor* Camera, bool bLookAt, FVector& OutWorld);
 
 	/** VersionName from Black_Eye.uplugin; empty when the plugin is not enabled. */
 	BLACKEYECUSTOMEDITOR_API FString GetInstalledVersion();

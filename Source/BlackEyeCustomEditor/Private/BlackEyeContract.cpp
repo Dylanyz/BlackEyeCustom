@@ -100,48 +100,55 @@ void BlackEyeContract::GetSubjectActors(const AActor* Camera, TArray<AActor*>& O
 	}
 }
 
-bool BlackEyeContract::GetFirstLookAtSubjectPoint(const AActor* Camera, FVector& OutWorld)
+bool BlackEyeContract::GetFirstSubjectPoint(const AActor* Camera, bool bLookAt, FVector& OutWorld)
 {
 	const UClass* Base = GetCameraBaseClass();
 	const UScriptStruct* TargetStruct = GetSimpleTargetStruct();
-	const FObjectPropertyBase* LookAtProp = Base ? CastField<FObjectPropertyBase>(Base->FindPropertyByName(LookAtPropertyName)) : nullptr;
-	const UObject* LookAt = (LookAtProp && Camera && Camera->IsA(Base)) ? LookAtProp->GetObjectPropertyValue_InContainer(Camera) : nullptr;
-	if (!LookAt || !TargetStruct)
+	const FObjectPropertyBase* CompProp = Base ? CastField<FObjectPropertyBase>(Base->FindPropertyByName(bLookAt ? LookAtPropertyName : FollowPropertyName)) : nullptr;
+	const UObject* Component = (CompProp && Camera && Camera->IsA(Base)) ? CompProp->GetObjectPropertyValue_InContainer(Camera) : nullptr;
+	if (!Component || !TargetStruct)
 	{
 		return false;
 	}
-	for (TFieldIterator<FStructProperty> It(LookAt->GetClass()); It; ++It)
+	for (TFieldIterator<FStructProperty> It(Component->GetClass()); It; ++It)
 	{
 		if (!It->Struct || !It->Struct->IsChildOf(TargetStruct))
 		{
 			continue;
 		}
-		// The first target struct declared is Target_0 (BlackEyeLookAtComponent.h:38).
-		const void* Target = It->ContainerPtrToValuePtr<void>(LookAt);
+		// The first target struct declared is Target_0 (BlackEyeLookAtComponent.h:38, BlackEyeFollowComponent.h:36).
+		const void* Target = It->ContainerPtrToValuePtr<void>(Component);
 		const AActor* Subject = ReadTargetActor(It->Struct, Target);
 		if (!Subject)
 		{
 			return false;
 		}
-		const FStrProperty* CompProp = FindFProperty<FStrProperty>(It->Struct, TargetComponentPropertyName);
+		const FStrProperty* CompNameProp = FindFProperty<FStrProperty>(It->Struct, TargetComponentPropertyName);
 		const FStrProperty* BoneProp = FindFProperty<FStrProperty>(It->Struct, TargetBonePropertyName);
-		const FString CompName = CompProp ? CompProp->GetPropertyValue_InContainer(Target) : FString();
+		const FString CompName = CompNameProp ? CompNameProp->GetPropertyValue_InContainer(Target) : FString();
 		const FString Bone = BoneProp ? BoneProp->GetPropertyValue_InContainer(Target) : FString();
 
-		// Black Eye resolves an empty component name to the actor's first skeletal mesh (see /ue-blackeye known issues).
-		const USceneComponent* Comp = nullptr;
-		TArray<USceneComponent*> Comps;
-		Subject->GetComponents(Comps);
-		for (const USceneComponent* C : Comps)
+		// As Black Eye resolves it: the named component, else the root (FBlackEyeSimpleTarget::GetTargetComponent,
+		// BlackEyeSimpleTarget.h ~L150), then the bone if that component has it. The point is the transform, not the
+		// bounds centre Black Eye uses with Use Component Bounds; for a tracker or bone the two coincide.
+		const USceneComponent* Comp = Subject->GetRootComponent();
+		if (!CompName.IsEmpty())
 		{
-			if (CompName.IsEmpty() ? C->IsA<USkeletalMeshComponent>() : C->GetName() == CompName)
+			TArray<USceneComponent*> Comps;
+			Subject->GetComponents(Comps);
+			for (const USceneComponent* C : Comps)
 			{
-				Comp = C;
-				break;
+				if (C->GetName() == CompName)
+				{
+					Comp = C;
+					break;
+				}
 			}
 		}
-		OutWorld = Comp ? (Bone.IsEmpty() ? Comp->GetComponentLocation() : Comp->GetSocketLocation(FName(*Bone)))
-		                : Subject->GetActorLocation();
+		const FName Socket(*Bone);
+		OutWorld = !Comp ? Subject->GetActorLocation()
+		         : (!Bone.IsEmpty() && Comp->DoesSocketExist(Socket)) ? Comp->GetSocketLocation(Socket)
+		         : Comp->GetComponentLocation();
 		return true;
 	}
 	return false;

@@ -12,7 +12,7 @@ own way inside Black Eye. It is an extension, not a fork: no Black Eye code is c
 
 | Extension | What it fixes | Status | Design |
 |---|---|---|---|
-| **Fast Bake** | Black Eye cameras jolt into frame at every cut when an edit is played in the editor, because their damping runs on wall-clock ticks, not the playhead. Fast Bake solves each camera offline, faster than realtime, into keys on a plain CineCamera that you can lock in and unlock. | P0 spike works: 90-124x realtime on the repro, matches live playback; keys, lock/unlock next (P1) | [docs/fast-bake/DESIGN.md](docs/fast-bake/DESIGN.md) |
+| **Fast Bake** | Black Eye cameras jolt into frame at every cut when an edit is played in the editor, because their damping runs on wall-clock ticks, not the playhead. Fast Bake solves each camera offline, faster than realtime, into keys on a plain CineCamera that you can lock in and unlock. | P0 done: 90-124x realtime on the repro, 9-10x on a production angle (a 23-min angle in ~2.6 min), within live playback's own spread; keys, lock/unlock next (P1) | [docs/fast-bake/DESIGN.md](docs/fast-bake/DESIGN.md) |
 
 ## For the Black Eye team
 

@@ -12,13 +12,13 @@ reproduced here; the files cited ship with each product's source.
 | [1. The problem and its root cause](#1-the-problem-and-its-root-cause) | confirmed from source |
 | [2. What already exists, and why none of it fits](#2-what-already-exists-and-why-none-of-it-fits) | confirmed from source |
 | [3. The algorithm](#3-the-algorithm) | built (P0: samples to CSV; keys are P1) |
-| [4. Traps](#4-traps) | 4.11 and 4.12 measured in P0; 4.1 and 4.4 confirmed; the rest from source and review |
+| [4. Traps](#4-traps) | 4.11-4.15 measured in P0; 4.1 and 4.4 confirmed; the rest from source and review |
 | [5. Output: the baked twin, lock and unlock](#5-output-the-baked-twin-lock-and-unlock) | planned |
 | [6. Entry points](#6-entry-points) | planned |
 | [7. What becomes trivial inside Black Eye](#7-what-becomes-trivial-inside-black-eye) | planned |
-| [8. Measured numbers](#8-measured-numbers) | measured on the repro (P0); a production angle pending |
+| [8. Measured numbers](#8-measured-numbers) | measured on the repro and on a production angle (P0) |
 | [9. Decisions and rejected ideas](#9-decisions-and-rejected-ideas) | live |
-| [10. Phases](#10-phases) | P0 done on the repro; P1 next |
+| [10. Phases](#10-phases) | P0 done; P1 next |
 | [11. Open questions](#11-open-questions) | live |
 | [12. Verification](#12-verification) | planned |
 
@@ -102,9 +102,10 @@ Per angle-shot Level Sequence, per BEC binding:
 4. **Step every frame** `f` in range, with `dt = 1/DisplayRate`, in `SubSteps` equal steps that land on `f`. The
    default is 1: one camera tick per frame, as a render at Temporal Sample Count 1 gets (trap 4.12).
    1. Evaluate with HasJumped (at the sub-frame time), then constraints.
-   2. Refresh only the **subject** skeletal meshes (those the LookAt / Follow / Focus targets attach to, plus their
-      leader and follower meshes), in leader-first order (trap 4.6). Evaluate constraints again.
-   3. `BEC->Tick(dt)`: the virtual `AActor::Tick`, whose BEC override runs Follow then LookAt.
+   2. Refresh only the **subject** skeletal meshes: those of each subject actor and of every actor up its attach
+      chain (trap 4.14), parents first (trap 4.6). Re-place socket-attached children. Evaluate constraints again.
+   3. `BEC->Tick(dt)`: the virtual `AActor::Tick`, whose BEC override runs Follow then LookAt. Then the camera
+      actor's own ticking components, in tick-group order, as a world tick would run them (trap 4.13).
    4. Sample the camera **component** world transform, `CurrentFocalLength`, `FocusSettings.ManualFocusDistance` and
       `CurrentAperture` into arrays.
 5. **Write keys** onto the baked twin (§5), in one transaction (trap 4.8).
@@ -175,6 +176,24 @@ needs no symbol because `Tick` is virtual on `AActor`. Every name used is checke
       Temporal Sample Count to match it. Default 1.
     - BE-NATIVE: a frame-rate-independent LookAt/Follow step (or internal sub-stepping at a fixed rate) would make
       editor, render and bake agree.
+13. **Measured: the camera's other components must tick too.** On a production camera carrying a lens component
+    (DynamicLens), stepping only the actor collapsed the focal length from 30 mm to 0 within ~150 frames, driving the
+    field of view toward 180 degrees, and the screen-space composition then aimed about 90 degrees off the subject.
+    Cause: Black Eye's known overscan feedback (LookAt shrinks focal by the overscan factor on each tick,
+    `BlackEyeLookUtils.cpp` `FBlackEyeLookAtState::UpdateFrom` ~L353), which DynamicLens's guard undoes after Black
+    Eye in every world tick. Fix: after `Tick`, run the camera actor's tick-enabled components in tick-group order
+    (`TickCameraComponents`). Control: with that switched off (`BlackEyeCustom.FastBake.Debug 32`) the collapse
+    returns. Black Eye's own components don't tick (`bCanEverTick` false), so nothing is stepped twice.
+14. **Measured: subjects are often trackers attached to a character's bone.** A LookAt subject was a `TargetPoint`
+    attached to a MetaHuman Face's `FACIAL_L_Eye` socket; its own actor has no skeletal mesh. The meshes to pose are
+    those of every actor up the subject's attach chain, and socket-attached children must be re-placed after the pose
+    (`UpdateChildTransforms(OnlyUpdateIfUsingSocket)`, as the engine does for follower meshes,
+    `SkinnedMeshComponent.cpp:3348`). With both, the tracker matched live playback to 0.01 cm.
+15. **Measured: the opening snap doesn't fully reset Black Eye.** `SnapComponentsToTargetsNow` is a LookAt tick with a
+    huge dt (`BlackEyeLookAtComponent.cpp` ~L165), so its result depends on the camera's state before it. Two bakes
+    of the same range started from different leftover states agree to 0.05 cm / 0.02 deg mean (max 0.4 cm / 0.1
+    deg). A few seconds of warm-up removes even that; renders have the same dependence on their warm-up.
+    BE-NATIVE: a snap that solves from a canonical state would make bakes bit-identical.
 
 ## 5. Output: the baked twin, lock and unlock
 
@@ -224,7 +243,7 @@ same shot, named `<BEC label>_Bake`.
 *Status: measured 2026-10-06 on the repro (`Tools/fast_bake_repro.py`: one walking mannequin, one BEC with Follow
 and a head-bone LookAt, 300 frames at 30 fps), UE 5.8.2, Black Eye 2.0.7, Ryzen 9 9950X3D. Raw tracks and a yaw plot
 are in `data/`; `Tools/compare_bake.py` reproduces every number below. A production angle (many meshes, MetaHumans)
-is still to measure.*
+is measured separately below.*
 
 **Speed** (1 tick per frame, subject meshes only; the scene has one skeletal mesh):
 
@@ -259,6 +278,27 @@ Once the tick rate matches (4 ticks, about the viewport's 120 fps), the bake rep
 own noise, damping included: realtime playback never snaps mid-shot. The 1-tick differences are trap 4.12, not a bake
 error. Focal length was constant in this shot (no Dynamic FoV), so focal keys are untested.
 
+**Production angle** (2026-10-06): a 30 fps shot about 42,000 frames (23 min) long holding a whole scene assembly:
+19 skeletal meshes including several MetaHumans, the subject a tracker on a MetaHuman eye, the camera carrying
+DynamicLens with overscan. 300-600 frame ranges, 1 tick per frame:
+
+| Measure | Value |
+|---|---|
+| Total per frame | 3.3-3.9 ms |
+| Sequencer evaluation (whole assembly) | 1.0-2.8 ms |
+| Subject mesh refresh (10 meshes up the attach chains) | 0.6-1.0 ms |
+| Refresh of all 19 skeletal meshes instead | 2.0 ms |
+| Camera tick + components | 0.03-0.06 ms |
+| Speed | **8.6-10.2x realtime**; the full 23-minute angle in about 2.6 min |
+
+Just under the 10x go line, because evaluating the whole assembly dominates. That is the case the shared subject pass
+(section 9) was parked for; it moves into P1 as an option, not a blocker (2.6 min an angle already beats 23).
+
+Correctness on this rig: live playback is **not repeatable**. Two realtime runs of the same range differ by 5.0 cm /
+5.9 deg mean (max 35 cm / 9 deg), because editor frame rate varies and trap 4.12 makes the result depend on it. The
+bake differs from those two runs by 0.45 cm / 0.17 deg and 5.9 cm / 6.0 deg mean, so it lies within live playback's
+own spread, and it repeats (trap 4.15). Locking a bake is the only way this shot plays the same way twice.
+
 ## 9. Decisions and rejected ideas
 
 - **Extension, not a fork of Black Eye** (2026-10-06). Everything the bake needs is reachable from outside: `Tick` is
@@ -283,11 +323,12 @@ error. Focal length was constant in this shot (no Dynamic FoV), so focal keys ar
 
 ## 10. Phases
 
-- **P0 spike:** *done 2026-10-06 on the repro, not yet on a production angle.* Results in section 8, new traps
-  4.11 and 4.12. Answered: tick-disable plus manual `Tick` works; tracker and bone targets update inside the blocking
+- **P0 spike:** *done 2026-10-06*, on the repro and on a production angle. Results in section 8, new traps
+  4.11-4.15. Answered: tick-disable plus manual `Tick` works; tracker and bone targets update inside the blocking
   loop (legacy anim path only, 4.11); damping survives with camera cuts off; LookAt sees a valid viewport inside a
-  blocking loop driven from Python under a modal slow task. Still open: a production angle's ms/frame, and a
-  `LinkedCamera` Take Recorder comparison (the realtime record above replaced it as the reference). The original list:
+  blocking loop driven from Python under a modal slow task. Production speed is 9-10x realtime (shared subject
+  pass optional in P1). The realtime record replaced the `LinkedCamera` Take Recorder comparison as the reference.
+  The original list:
   - Measure ms/frame, whole-assembly evaluation vs subject-mesh refresh; profile which meshes refresh per evaluation.
   - Check the tick-disable plus manual `Tick` path, and that tracker/bone targets update inside the blocking loop.
   - Confirm damping survives with the camera-cut handler disabled.

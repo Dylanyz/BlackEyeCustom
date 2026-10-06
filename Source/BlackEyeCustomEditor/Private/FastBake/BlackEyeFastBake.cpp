@@ -27,6 +27,16 @@
 
 #include UE_INLINE_GENERATED_CPP_BY_NAME(BlackEyeFastBakeLibrary)
 
+// Debugging switches, a bitmask, for bisecting a bake that disagrees with live playback. 0 in normal use.
+// 1 keep viewport camera cuts on | 2 don't force Constrain Aspect Ratio | 4 skip the subject mesh refresh
+// 8 evaluate without HasJumped | 16 freeze time at the first frame (tick the camera only)
+// 32 skip ticking the camera's own components after it
+static TAutoConsoleVariable<int32> CVarFastBakeDebug(
+	TEXT("BlackEyeCustom.FastBake.Debug"), 0,
+	TEXT("Bitmask to switch bake steps off when bisecting (see BlackEyeFastBake.cpp). 0 = normal."));
+
+static int32 DebugFlags() { return CVarFastBakeDebug.GetValueOnGameThread(); }
+
 static TAutoConsoleVariable<int32> CVarFastBakeVerbose(
 	TEXT("BlackEyeCustom.FastBake.Verbose"), 0,
 	TEXT("1: log each refreshed mesh's animation state for the first frames of a bake (diagnosing frozen subjects)."));
@@ -41,6 +51,7 @@ namespace BlackEyeFastBake
 		float FocusDistance = 0.f;
 		float Aperture = 0.f;
 		FVector Subject = FVector::ZeroVector; // LookAt Target_0's bone: did the bake see the live pose?
+		FVector FollowSubject = FVector::ZeroVector; // Follow Target_0's bone
 	};
 
 	FSample Sample(const ACineCameraActor* Camera, double Frame)
@@ -53,21 +64,22 @@ namespace BlackEyeFastBake
 		S.FocalLength = Cam->CurrentFocalLength;
 		S.FocusDistance = Cam->FocusSettings.ManualFocusDistance;
 		S.Aperture = Cam->CurrentAperture;
-		BlackEyeContract::GetFirstLookAtSubjectPoint(Camera, S.Subject);
+		BlackEyeContract::GetFirstSubjectPoint(Camera, true, S.Subject);
+		BlackEyeContract::GetFirstSubjectPoint(Camera, false, S.FollowSubject);
 		return S;
 	}
 
 	bool WriteCsv(const FString& Path, const TArray<FSample>& Samples)
 	{
-		FString Out = TEXT("frame,x,y,z,qx,qy,qz,qw,pitch,yaw,roll,focal,focus,aperture,sx,sy,sz\n");
+		FString Out = TEXT("frame,x,y,z,qx,qy,qz,qw,pitch,yaw,roll,focal,focus,aperture,sx,sy,sz,fx,fy,fz\n");
 		for (const FSample& S : Samples)
 		{
 			const FVector L = S.CameraWorld.GetLocation();
 			const FQuat Q = S.CameraWorld.GetRotation();
 			const FRotator R = Q.Rotator();
-			Out += FString::Printf(TEXT("%.4f,%.4f,%.4f,%.4f,%.8f,%.8f,%.8f,%.8f,%.5f,%.5f,%.5f,%.5f,%.4f,%.4f,%.4f,%.4f,%.4f\n"),
+			Out += FString::Printf(TEXT("%.4f,%.4f,%.4f,%.4f,%.8f,%.8f,%.8f,%.8f,%.5f,%.5f,%.5f,%.5f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f\n"),
 				S.Frame, L.X, L.Y, L.Z, Q.X, Q.Y, Q.Z, Q.W, R.Pitch, R.Yaw, R.Roll, S.FocalLength, S.FocusDistance, S.Aperture,
-				S.Subject.X, S.Subject.Y, S.Subject.Z);
+				S.Subject.X, S.Subject.Y, S.Subject.Z, S.FollowSubject.X, S.FollowSubject.Y, S.FollowSubject.Z);
 		}
 		return FFileHelper::SaveStringToFile(Out, *Path);
 	}
@@ -124,8 +136,32 @@ namespace BlackEyeFastBake
 		FMovieSceneContext Context(FMovieSceneEvaluationRange(Tick, MovieScene.GetTickResolution()), Sequencer.GetPlaybackStatus());
 		// Jumped, so every track evaluates its absolute state at this frame. Safe only because viewport camera
 		// cuts are off for the bake: with them on, a jump makes every frame a camera cut that snaps the camera [4.1].
-		Context.SetHasJumped(true);
+		Context.SetHasJumped((DebugFlags() & 8) == 0);
 		Sequencer.GetEvaluationTemplate().EvaluateSynchronousBlocking(Context);
+	}
+
+	/**
+	 * Runs the camera's own ticking components, in tick-group order, as a world tick would after the actor. A lens
+	 * component that corrects Black Eye's output must run: DynamicLens restores the focal length Black Eye shrinks
+	 * by the overscan factor on every LookAt tick, and without it focal collapses to 0 within a few hundred steps
+	 * (DESIGN trap 4.13). Black Eye's own components don't tick (bCanEverTick false), so they aren't stepped twice.
+	 * BE-NATIVE: fixing the overscan feedback in FBlackEyeLookAtState::UpdateFrom (BlackEyeLookUtils.cpp ~L353)
+	 * removes the need for any component to run after Black Eye.
+	 */
+	void TickCameraComponents(AActor* Camera, float Dt)
+	{
+		TInlineComponentArray<UActorComponent*> Components(Camera);
+		Components.StableSort([](const UActorComponent& A, const UActorComponent& B)
+		{
+			return A.PrimaryComponentTick.TickGroup < B.PrimaryComponentTick.TickGroup;
+		});
+		for (UActorComponent* Component : Components)
+		{
+			if (Component->IsRegistered() && Component->PrimaryComponentTick.bCanEverTick && Component->IsComponentTickEnabled())
+			{
+				Component->TickComponent(Dt, LEVELTICK_All, &Component->PrimaryComponentTick);
+			}
+		}
 	}
 
 	int32 AttachDepth(const USceneComponent* Component)
@@ -146,11 +182,24 @@ namespace BlackEyeFastBake
 		{
 			TArray<AActor*> Subjects;
 			BlackEyeContract::GetSubjectActors(Camera, Subjects);
+			// A subject is often a tracker attached to a character's bone (a MetaHuman Face's FACIAL_L_Eye), so the
+			// meshes to pose are those of every actor up its attach chain, not just its own.
+			TSet<AActor*> Owners;
 			for (AActor* Subject : Subjects)
 			{
+				for (AActor* A = Subject; A && !Owners.Contains(A); A = A->GetAttachParentActor())
+				{
+					Owners.Add(A);
+				}
+			}
+			for (AActor* Owner : Owners)
+			{
 				TArray<USkeletalMeshComponent*> Meshes;
-				Subject->GetComponents(Meshes);
-				Out.Append(Meshes);
+				Owner->GetComponents(Meshes);
+				for (USkeletalMeshComponent* Mesh : Meshes)
+				{
+					Out.AddUnique(Mesh);
+				}
 			}
 		}
 		else
@@ -248,7 +297,10 @@ FBlackEyeFastBakeReport UBlackEyeFastBakeLibrary::BakeCameraToCsv(ULevelSequence
 	Restore.Time = Sequencer->GetLocalTime();
 	Restore.bCameraCuts = Sequencer->IsPerspectiveViewportCameraCutEnabled();
 	// BE-NATIVE: an editor camera cut that snaps correctly would make this unnecessary (DESIGN §7).
-	Sequencer->SetPerspectiveViewportCameraCutEnabled(false); // [4.1]
+	if ((DebugFlags() & 1) == 0)
+	{
+		Sequencer->SetPerspectiveViewportCameraCutEnabled(false); // [4.1]
+	}
 
 	// Spawnables exist only once evaluated, so evaluate the first frame before looking for the camera.
 	Evaluate(*Sequencer, MovieScene, FFrameTime(WarmUpStart));
@@ -269,7 +321,7 @@ FBlackEyeFastBakeReport UBlackEyeFastBakeLibrary::BakeCameraToCsv(ULevelSequence
 	Camera->SetActorTickEnabled(false);
 	// Solve against the filmback aspect, as a render does, not the editor viewport's shape.
 	Restore.bConstrainAspect = Camera->GetCineCameraComponent()->bConstrainAspectRatio;
-	Camera->GetCineCameraComponent()->bConstrainAspectRatio = true;
+	Camera->GetCineCameraComponent()->bConstrainAspectRatio = (DebugFlags() & 2) ? Restore.bConstrainAspect : true;
 	// Black Eye's Tick dereferences the active viewport without a null check when the camera is selected [4.2].
 	if (Camera->IsSelected())
 	{
@@ -294,7 +346,7 @@ FBlackEyeFastBakeReport UBlackEyeFastBakeLibrary::BakeCameraToCsv(ULevelSequence
 	auto Step = [&](FFrameTime Time, int32 Frame, bool bSnap)
 	{
 		double T = FPlatformTime::Seconds();
-		Evaluate(*Sequencer, MovieScene, Time);
+		Evaluate(*Sequencer, MovieScene, (DebugFlags() & 16) ? FFrameTime(WarmUpStart) : Time);
 		{
 			const UE::Anim::FEvaluationForCachingScope CachingScope(StepDt);
 			FConstraintsManagerController::Get(World).EvaluateAllConstraints();
@@ -319,6 +371,10 @@ FBlackEyeFastBakeReport UBlackEyeFastBakeLibrary::BakeCameraToCsv(ULevelSequence
 
 		T = FPlatformTime::Seconds();
 		GatherMeshes(World, Camera, Options.bRefreshSubjectsOnly, Meshes);
+		if (DebugFlags() & 4)
+		{
+			Meshes.Reset();
+		}
 		const bool bVerbose = CVarFastBakeVerbose.GetValueOnGameThread() > 0 && (Frame - WarmUpStart < 4 || Frame % 50 == 0);
 		for (USkeletalMeshComponent* Mesh : Meshes)
 		{
@@ -331,6 +387,9 @@ FBlackEyeFastBakeReport UBlackEyeFastBakeLibrary::BakeCameraToCsv(ULevelSequence
 			Mesh->RefreshFollowerComponents();
 			Mesh->UpdateComponentToWorld();
 			Mesh->FinalizeBoneTransform();
+			// Re-place anything attached to a bone or socket (a tracker on an eye), as the engine does for follower
+			// meshes (SkinnedMeshComponent.cpp:3348); finalizing the pose alone leaves them where they were.
+			Mesh->UpdateChildTransforms(EUpdateTransformFlags::OnlyUpdateIfUsingSocket);
 			Mesh->MarkRenderTransformDirty();
 			Mesh->MarkRenderDynamicDataDirty();
 			if (bVerbose)
@@ -359,7 +418,20 @@ FBlackEyeFastBakeReport UBlackEyeFastBakeLibrary::BakeCameraToCsv(ULevelSequence
 		else
 		{
 			// The BEC override of AActor::Tick runs Follow then LookAt (BlackEyeCineCameraActorBase.cpp:124-150).
+			const FRotator CamBefore = Camera->GetCineCameraComponent()->GetComponentRotation();
 			Camera->Tick(StepDt);
+			if (CVarFastBakeVerbose.GetValueOnGameThread() > 0 && (Frame - WarmUpStart < 4 || Frame % 50 == 0))
+			{
+				const FViewport* Active = GEditor ? GEditor->GetActiveViewport() : nullptr;
+				UE_LOG(LogBlackEyeCustom, Display, TEXT("[BlackEyeCustom] verbose f%d viewport %s %dx%d | actor yaw %.2f | camera yaw %.2f -> %.2f | focal %.2f"),
+					Frame, Active ? TEXT("ok") : TEXT("NONE"), Active ? Active->GetSizeXY().X : 0, Active ? Active->GetSizeXY().Y : 0,
+					Camera->GetActorRotation().Yaw, CamBefore.Yaw, Camera->GetCineCameraComponent()->GetComponentRotation().Yaw,
+					Camera->GetCineCameraComponent()->CurrentFocalLength);
+			}
+		}
+		if ((DebugFlags() & 32) == 0)
+		{
+			TickCameraComponents(Camera, StepDt);
 		}
 		TTick += FPlatformTime::Seconds() - T;
 	};
