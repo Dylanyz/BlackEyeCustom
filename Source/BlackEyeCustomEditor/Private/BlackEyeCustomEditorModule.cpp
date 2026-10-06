@@ -3,6 +3,7 @@
 #include "HAL/IConsoleManager.h"
 #include "Modules/ModuleManager.h"
 #include "BlackEyeContract.h"
+#include "FastBake/BlackEyeFastBakeInternal.h"
 
 /**
  * `BlackEyeCustom.SelfTest` in the console checks every Black Eye symbol this plugin reaches by name
@@ -13,4 +14,18 @@ static FAutoConsoleCommand GBlackEyeCustomSelfTest(
 	TEXT("Check that every Black Eye class, function and property this plugin relies on still resolves."),
 	FConsoleCommandDelegate::CreateStatic([]() { BlackEyeContract::RunSelfTest(); }));
 
-IMPLEMENT_MODULE(FDefaultModuleImpl, BlackEyeCustomEditor);
+class FBlackEyeCustomEditorModule : public IModuleInterface
+{
+public:
+	virtual void StartupModule() override
+	{
+		BlackEyeFastBake::RegisterMenus();
+	}
+
+	virtual void ShutdownModule() override
+	{
+		BlackEyeFastBake::UnregisterMenus();
+	}
+};
+
+IMPLEMENT_MODULE(FBlackEyeCustomEditorModule, BlackEyeCustomEditor);

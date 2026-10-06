@@ -44,6 +44,10 @@ struct FBlackEyeFastBakeOptions
 	/** Where to write the per-frame samples. Empty: no file. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Fast Bake")
 	FString CsvPath;
+
+	/** BakeShot only: point the shot's camera cuts at the baked twin afterwards, so the shot plays the bake. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Fast Bake")
+	bool bLockAfterBake = true;
 };
 
 /** What one bake did, and what it cost. */
@@ -66,11 +70,28 @@ struct FBlackEyeFastBakeReport
 	UPROPERTY(BlueprintReadOnly, Category = "Fast Bake") double MsCameraTick = 0.0;
 	/** Sequence seconds baked per wall-clock second. */
 	UPROPERTY(BlueprintReadOnly, Category = "Fast Bake") double SpeedVsRealtime = 0.0;
+	/** BakeShot only: the twin binding written, and whether the shot now plays it. */
+	UPROPERTY(BlueprintReadOnly, Category = "Fast Bake") FString TwinBindingName;
+	UPROPERTY(BlueprintReadOnly, Category = "Fast Bake") bool bLocked = false;
+};
+
+/** One baked Black Eye camera in a sequence. */
+USTRUCT(BlueprintType)
+struct FBlackEyeBakeInfo
+{
+	GENERATED_BODY()
+
+	UPROPERTY(BlueprintReadOnly, Category = "Fast Bake") FString CameraBindingName;
+	UPROPERTY(BlueprintReadOnly, Category = "Fast Bake") FString TwinBindingName;
+	/** True when the sequence's camera cuts play the twin rather than the live Black Eye camera. */
+	UPROPERTY(BlueprintReadOnly, Category = "Fast Bake") bool bLocked = false;
+	/** When and how it was baked: date, frame range, sub-steps, warm-up, Black Eye version. */
+	UPROPERTY(BlueprintReadOnly, Category = "Fast Bake") FString Info;
 };
 
 /**
  * Fast Bake entry points, callable from Blueprint and Python (unreal.BlackEyeFastBakeLibrary).
- * P0 spike: bakes to CSV only; writing keys onto a twin camera is P1. docs/fast-bake/DESIGN.md.
+ * BakeShot is the feature; BakeCameraToCsv and the realtime record are for measuring it. docs/fast-bake/DESIGN.md.
  */
 UCLASS()
 class BLACKEYECUSTOMEDITOR_API UBlackEyeFastBakeLibrary : public UBlueprintFunctionLibrary
@@ -96,4 +117,25 @@ public:
 	/** Stops a realtime record and writes it. Returns the number of samples written. */
 	UFUNCTION(BlueprintCallable, Category = "Black Eye|Fast Bake")
 	static int32 StopRealtimeRecord(const FString& CsvPath);
+
+	/**
+	 * Bakes one Black Eye camera of a shot into keys on its twin: a spawnable plain CineCamera named
+	 * "<camera binding>_Bake" beside it, created on the first bake and rewritten on every re-bake. The twin gets the
+	 * camera's lens, filmback, crop, overscan, post process and its non-Black-Eye components (a lens component such
+	 * as DynamicLens), and keys for transform, focal length, focus distance and aperture on every frame. One undo
+	 * step. With bLockAfterBake the shot's camera cuts then play the twin.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Black Eye|Fast Bake")
+	static FBlackEyeFastBakeReport BakeShot(ULevelSequence* Sequence, const FBlackEyeFastBakeOptions& Options);
+
+	/**
+	 * Locks (camera cuts play the baked twin) or unlocks (camera cuts play the live Black Eye camera) a baked camera.
+	 * Empty CameraBindingName: every baked camera in the sequence. Returns the number of camera cut sections changed.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Black Eye|Fast Bake")
+	static int32 SetLocked(ULevelSequence* Sequence, const FString& CameraBindingName, bool bLocked);
+
+	/** Every baked Black Eye camera in the sequence: its twin, whether it's locked, and how it was baked. */
+	UFUNCTION(BlueprintCallable, Category = "Black Eye|Fast Bake")
+	static TArray<FBlackEyeBakeInfo> GetBakeInfo(ULevelSequence* Sequence);
 };

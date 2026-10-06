@@ -11,14 +11,14 @@ reproduced here; the files cited ship with each product's source.
 |---|---|
 | [1. The problem and its root cause](#1-the-problem-and-its-root-cause) | confirmed from source |
 | [2. What already exists, and why none of it fits](#2-what-already-exists-and-why-none-of-it-fits) | confirmed from source |
-| [3. The algorithm](#3-the-algorithm) | built (P0: samples to CSV; keys are P1) |
+| [3. The algorithm](#3-the-algorithm) | built |
 | [4. Traps](#4-traps) | 4.11-4.15 measured in P0; 4.1 and 4.4 confirmed; the rest from source and review |
-| [5. Output: the baked twin, lock and unlock](#5-output-the-baked-twin-lock-and-unlock) | planned |
-| [6. Entry points](#6-entry-points) | planned |
+| [5. Output: the baked twin, lock and unlock](#5-output-the-baked-twin-lock-and-unlock) | built, measured on a production edit |
+| [6. Entry points](#6-entry-points) | library and Sequencer menu built; Content Browser batch is P2 |
 | [7. What becomes trivial inside Black Eye](#7-what-becomes-trivial-inside-black-eye) | planned |
 | [8. Measured numbers](#8-measured-numbers) | measured on the repro and on a production angle (P0) |
 | [9. Decisions and rejected ideas](#9-decisions-and-rejected-ideas) | live |
-| [10. Phases](#10-phases) | P0 done; P1 next |
+| [10. Phases](#10-phases) | P0 and P1 done; P2 next |
 | [11. Open questions](#11-open-questions) | live |
 | [12. Verification](#12-verification) | planned |
 
@@ -85,8 +85,9 @@ angle: about 30 minutes per angle, times ten angles a scene. That is the number 
 
 ## 3. The algorithm
 
-*Status: built as the P0 spike (`Source/BlackEyeCustomEditor/Private/FastBake/BlackEyeFastBake.cpp`,
-`UBlackEyeFastBakeLibrary::BakeCameraToCsv`). It samples to CSV; writing keys onto the twin (step 5) is P1.*
+*Status: built. The loop is `RunBake` in `Private/FastBake/BlackEyeFastBake.cpp`; step 5 is
+`BlackEyeFastBakeTwin.cpp`. With no camera named, the bake takes the Black Eye camera the shot's camera cuts use
+(shots often hold a spare one), then the first one bound.*
 
 Per angle-shot Level Sequence, per BEC binding:
 
@@ -197,31 +198,62 @@ needs no symbol because `Tick` is virtual on `AActor`. Every name used is checke
 
 ## 5. Output: the baked twin, lock and unlock
 
-*Status: planned.*
+*Status: built and measured (2026-10-06).*
 
-**The twin** (decided 2026-10-06). Every bake creates a fresh spawnable plain `ACineCameraActor` beside the BEC in the
-same shot, named `<BEC label>_Bake`.
-- A re-bake replaces the previous twin; optionally the old one is kept, muted, for comparison.
-- Camera settings (filmback, lens, overscan, crop, post process, focus method) are copied from the BEC, plus
-  non-Black-Eye components on it (for example a lens-model component). Check that instance components survive the
-  spawnable template.
-- Keys: the Transform track (actor = camera component world), `CurrentFocalLength`, `FocusSettings.ManualFocusDistance`.
+**The twin.** A spawnable plain `ACineCameraActor` beside the BEC in the same shot, named `<BEC binding>_Bake`, found
+again by a binding tag (`BlackEyeFastBake_<BEC guid>`).
+- **Changed from the plan:** a re-bake rewrites the same twin binding rather than deleting and recreating it. In 5.8
+  a spawnable is a custom binding (`UMovieSceneSpawnableActorBinding`), so recreating means more machinery for the
+  same result, and a locked camera cut keeps pointing at the twin across re-bakes.
+- Made with `FSequencerUtilities::MakeNewSpawnable` (Sequencer's Add > Actor path). Not `CreateCamera`: it also locks
+  the viewport and adds a camera cut section (`SequencerUtilities.cpp` `NewCameraAdded`).
+- Settings: every editable property `UCameraComponent` and `UCineCameraComponent` declare, copied from the BEC's
+  **spawnable template** (the authored setup; the spawned instance is transient and carries runtime edits), plus the
+  components a user or Blueprint added (DynamicLens). Focus method forced to Manual. Camera component at identity.
+- **Measured trap:** a component added to a spawnable template by hand does not survive spawning. The twin is edited
+  as its spawned instance and saved with `FMovieSceneSpawnRegister::SaveDefaultSpawnableState` (Sequencer's own
+  "Save Default State"); then it does. **Also:** DynamicLens's helper adds its component with `AddInstanceComponent`
+  but leaves `CreationMethod` at Native, so components are taken from the instance list too.
+- DynamicLens on the twin is safe: its focal writes (kit snap, locked focal, clamp to the measured range) are
+  idempotent, and its overscan guard has no feedback to undo on a plain CineCamera. Measured: twin and live camera
+  agree on focal 30 mm, filmback 23.0 x 18.66, overscan 0.08 at runtime.
+- Keys on every frame, auto-tangent cubic: actor Transform (= the BEC camera component's world transform, rotation
+  unwound), and on the twin's camera-component binding `CurrentFocalLength`, `FocusSettings.ManualFocusDistance`,
+  `CurrentAperture`. Measured: twin playback equals the baked samples to 0.0000 at every frame checked.
+- Bake info (date, range, sub-steps, warm-up, Black Eye version, components copied) lives in the twin template's
+  actor Tags, so it undoes with the keys. Package metadata isn't transacted in 5.8.
 
-**Lock / unlock.** State lives as asset metadata on the shot plus a tag on the twin binding.
-- Lock: repoint the shot's camera cut track to the twin. The BEC stays in the shot, untouched.
-- Unlock: repoint it back to the BEC. The twin's keys stay, for comparison and re-bake.
-- Because the bake lives in the shot, every edit or master sequence that nests the shot plays and renders the baked
-  camera.
-- Re-sync settings: copy non-motion settings from the BEC to the twin without re-baking.
+**Lock / unlock.** Lock repoints the shot's camera cut sections from the BEC to the twin; unlock repoints them back.
+Locked = a cut section points at the twin; no other state. The BEC stays untouched, so unlock returns the live camera.
+Every edit or master that nests the shot plays and renders whichever is locked. Bake, lock and unlock are each one undo
+step (measured, including undoing bakes on production shots).
+
+**Measured on a production edit** (a scene's demo edit cutting between three angle shots, viewport locked to camera
+cuts, realtime playback, camera speed in the 14 frames after each cut):
+
+| Cut | Unlocked (live Black Eye) | Locked (twins) |
+|---|---|---|
+| 1 | 0.11 deg/frame | 0.29-0.43 deg/frame (the shot's own opening move) |
+| 2 | 0.06 deg/frame | 0.12-0.16 deg/frame |
+| 3 | **3.16 deg/frame, 73 cm/frame** | 0.33-0.37 deg/frame |
+| 4 | **3.60 deg/frame, 56 cm/frame** | 0.20-0.24 deg/frame |
+
+Mid-shot camera speed is about 0.04-0.06 deg/frame. Unlocked, the jolts are 50-90x that; a second unlocked run showed
+none at those cuts, because live Black Eye depends on leftover camera state. Locked runs repeat.
+
+Not built yet: re-sync settings without re-baking (P2); keeping the previous bake for comparison.
 
 ## 6. Entry points
 
 *Status: planned.*
 
-- **Sequencer binding right-click:** Black Eye ▸ Bake / Lock / Unlock / Re-bake.
+- **Sequencer binding right-click** (built): Black Eye Fast Bake ▸ Bake and lock / Re-bake and lock, Lock / Unlock,
+  with the bake info in the tooltips and a toast with the result (`BlackEyeFastBakeMenu.cpp`). Not yet clicked by a
+  person: the code behind it is the same as `BakeShot`.
 - **Content Browser:** right-click shot Level Sequence(s) ▸ Bake Black Eye cameras, in batch (all angles at once).
-- **`UBlackEyeBakeLibrary`** (BlueprintCallable, so Python and agents can drive it): `BakeShot(LS, Options)`,
-  `SetLocked(LS, bool)`, `GetBakeInfo(LS)`.
+- **`UBlackEyeFastBakeLibrary`** (built; BlueprintCallable, so Python and agents can drive it): `BakeShot(LS, Options)`,
+  `SetLocked(LS, CameraBindingName, bool)`, `GetBakeInfo(LS)`, plus `BakeCameraToCsv` and the realtime record for
+  measuring.
 - **`BlackEyeCustom.SelfTest`** console command (built: checks the Black Eye contract, §3).
 
 ## 7. What becomes trivial inside Black Eye
@@ -335,8 +367,9 @@ own spread, and it repeats (trap 4.15). Locking a bake is the only way this shot
   - Compare the baked curve against a realtime `LinkedCamera` Take Recorder record.
   - **Go/no-go on ≥10× realtime.** Lower, and the shared subject pass moves into P1.
   - Save the numbers to `docs/fast-bake/data/` and §8.
-- **P1 MVP:** a Manny repro map; every workaround tagged `BE-NATIVE`; README section; full-range bake into the twin;
-  lock/unlock; binding menu and library; copying non-Black-Eye components; cancel/progress; undo.
+- **P1 MVP:** *done 2026-10-06.* Repro script; `BE-NATIVE` tags; README section; bake into the twin (full range
+  or a frame range with warm-up); lock/unlock; binding menu and library; non-Black-Eye components (DynamicLens);
+  cancel/progress; undo. Full-range bakes of three production angles: 87k frames in 3.8 min (12-24x realtime).
 - **P2 batch and UX:** Content Browser batch over a shots folder; bake info (date, range, BEC parameter hash); a stale
   flag when BEC tracks or subject sections change (reusing AutoBake's track-signature idea); re-sync settings.
 - **P3 speed** (only if P0 numbers need it): edit-aware partial bakes (only the ranges each shot is cut into, plus

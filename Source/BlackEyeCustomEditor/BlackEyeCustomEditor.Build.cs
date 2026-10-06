@@ -28,8 +28,11 @@ public class BlackEyeCustomEditor : ModuleRules
 				"LevelSequence",
 				"LevelSequenceEditor",
 				"MovieScene",
+				"MovieSceneTracks",
 				"Projects",
 				"Sequencer",
+				"Slate",
+				"SlateCore",
 				"UnrealEd",
 			}
 		);

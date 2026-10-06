@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// Fast Bake, P0 spike: step a Black Eye camera offline at a fixed dt and sample what it solves.
+// Fast Bake: step a Black Eye camera offline at a fixed dt and sample what it solves. Writing the samples onto the
+// baked twin and locking it is BlackEyeFastBakeTwin.cpp.
 // The why behind every step is docs/fast-bake/DESIGN.md (sections 3 and 4); numbers in brackets below are its traps.
 
 #include "BlackEyeFastBakeLibrary.h"
+#include "BlackEyeFastBakeInternal.h"
 
 #include "BlackEyeContract.h"
 #include "CineCameraActor.h"
@@ -21,6 +23,8 @@
 #include "Misc/FileHelper.h"
 #include "Misc/ScopedSlowTask.h"
 #include "MovieScene.h"
+#include "Sections/MovieSceneCameraCutSection.h"
+#include "Tracks/MovieSceneCameraCutTrack.h"
 #include "Subsystems/AssetEditorSubsystem.h"
 #include "Transform/AnimationEvaluation.h"
 #include "UObject/UObjectIterator.h"
@@ -43,17 +47,6 @@ static TAutoConsoleVariable<int32> CVarFastBakeVerbose(
 
 namespace BlackEyeFastBake
 {
-	struct FSample
-	{
-		double Frame = 0.0;
-		FTransform CameraWorld;
-		float FocalLength = 0.f;
-		float FocusDistance = 0.f;
-		float Aperture = 0.f;
-		FVector Subject = FVector::ZeroVector; // LookAt Target_0's bone: did the bake see the live pose?
-		FVector FollowSubject = FVector::ZeroVector; // Follow Target_0's bone
-	};
-
 	FSample Sample(const ACineCameraActor* Camera, double Frame)
 	{
 		const UCineCameraComponent* Cam = Camera->GetCineCameraComponent();
@@ -269,7 +262,12 @@ namespace BlackEyeFastBake
 
 FBlackEyeFastBakeReport UBlackEyeFastBakeLibrary::BakeCameraToCsv(ULevelSequence* Sequence, const FBlackEyeFastBakeOptions& Options)
 {
-	using namespace BlackEyeFastBake;
+	BlackEyeFastBake::FBakeOutput Out;
+	return BlackEyeFastBake::RunBake(Sequence, Options, Out);
+}
+
+FBlackEyeFastBakeReport BlackEyeFastBake::RunBake(ULevelSequence* Sequence, const FBlackEyeFastBakeOptions& Options, FBakeOutput& Out)
+{
 	FBlackEyeFastBakeReport Report;
 
 	TSharedPtr<ISequencer> Sequencer = OpenSequencer(Sequence, Report.Message);
@@ -304,7 +302,24 @@ FBlackEyeFastBakeReport UBlackEyeFastBakeLibrary::BakeCameraToCsv(ULevelSequence
 
 	// Spawnables exist only once evaluated, so evaluate the first frame before looking for the camera.
 	Evaluate(*Sequencer, MovieScene, FFrameTime(WarmUpStart));
+	// No name given: the Black Eye camera the shot's camera cuts use, so a shot holding a spare camera bakes the
+	// one that plays. Only then the first Black Eye camera bound.
 	FGuid Binding;
+	if (Options.CameraBindingName.IsEmpty())
+	{
+		if (const UMovieSceneCameraCutTrack* Cuts = Cast<UMovieSceneCameraCutTrack>(MovieScene.GetCameraCutTrack()))
+		{
+			for (const UMovieSceneSection* Section : Cuts->GetAllSections())
+			{
+				const UMovieSceneCameraCutSection* Cut = Cast<UMovieSceneCameraCutSection>(Section);
+				FGuid Candidate = Cut ? Cut->GetCameraBindingID().GetGuid() : FGuid();
+				if (!Binding.IsValid() && Candidate.IsValid() && FindCamera(*Sequencer, FString(), Candidate))
+				{
+					Binding = Candidate;
+				}
+			}
+		}
+	}
 	ACineCameraActor* Camera = FindCamera(*Sequencer, Options.CameraBindingName, Binding);
 	if (!Camera)
 	{
@@ -494,6 +509,9 @@ FBlackEyeFastBakeReport UBlackEyeFastBakeLibrary::BakeCameraToCsv(ULevelSequence
 	}
 	Report.bSuccess = Report.bCameraMoved;
 	Report.Message = Report.bCameraMoved ? TEXT("ok") : TEXT("the camera never moved: no valid viewport, or no subjects");
+	Out.Sequencer = Sequencer;
+	Out.CameraBinding = Binding;
+	Out.Samples = MoveTemp(Samples);
 	UE_LOG(LogBlackEyeCustom, Display, TEXT("[BlackEyeCustom] Fast Bake %s: %d frames in %.2fs, %.2f ms/frame (eval %.2f, meshes %.2f x%d, tick %.3f), %.1fx realtime: %s"),
 		*Report.CameraLabel, Report.NumFrames, Report.TotalSeconds, Report.MsPerFrame, Report.MsEvaluate, Report.MsRefreshMeshes,
 		Report.NumRefreshedMeshes, Report.MsCameraTick, Report.SpeedVsRealtime, *Report.Message);
