@@ -26,6 +26,7 @@ public class BlackEyeCustomEditor : ModuleRules
 			{
 				"CinematicCamera",
 				"Constraints",
+				"ContentBrowser",
 				"LevelSequence",
 				"LevelSequenceEditor",
 				"MovieScene",
@@ -34,6 +35,7 @@ public class BlackEyeCustomEditor : ModuleRules
 				"Sequencer",
 				"Slate",
 				"SlateCore",
+				"ToolMenus",
 				"UnrealEd",
 			}
 		);

@@ -9,6 +9,16 @@
 
 class ULevelSequence;
 
+/** A span of display frames, end exclusive. */
+USTRUCT(BlueprintType)
+struct FBlackEyeBakeRange
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Fast Bake") int32 StartFrame = 0;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Fast Bake") int32 EndFrame = 0;
+};
+
 /** What one bake should do. Frames are display frames of the sequence being baked. */
 USTRUCT(BlueprintType)
 struct FBlackEyeFastBakeOptions
@@ -27,9 +37,23 @@ struct FBlackEyeFastBakeOptions
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Fast Bake")
 	int32 EndFrame = INDEX_NONE;
 
-	/** Frames stepped (not sampled) before StartFrame, after the snap, so damping is settled when sampling begins. */
+	/**
+	 * Bake only these spans (each end exclusive), keyed and nothing between them; StartFrame and EndFrame are then
+	 * ignored. Spans closer together than WarmUpFrames are stepped through in one run. GetEditBakePlan fills it.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Fast Bake")
+	TArray<FBlackEyeBakeRange> Ranges;
+
+	/** Frames stepped (not sampled) before StartFrame (or before each run of Ranges), after the snap and settle. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Fast Bake")
 	int32 WarmUpFrames = 0;
+
+	/**
+	 * BakeShot only: keep the twin's keys outside the frames baked now, so bakes for several edits that use the same
+	 * shot add up. False replaces every key (a full re-bake).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Fast Bake")
+	bool bKeepOtherKeys = false;
 
 	/**
 	 * Camera ticks per frame. 1 matches a render at the sequence frame rate (one tick per output frame). Higher values
@@ -56,6 +80,9 @@ struct FBlackEyeFastBakeOptions
 	/** BakeShot only: point the shot's camera cuts at the baked twin afterwards, so the shot plays the bake. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Fast Bake")
 	bool bLockAfterBake = true;
+
+	/** Appended to the progress dialog's title (a batch's "shot 2 of 5"). Not reflected. */
+	FString ProgressNote;
 };
 
 /** What one bake did, and what it cost. */
@@ -95,6 +122,20 @@ struct FBlackEyeBakeInfo
 	UPROPERTY(BlueprintReadOnly, Category = "Fast Bake") bool bLocked = false;
 	/** When and how it was baked: date, frame range, sub-steps, warm-up, Black Eye version. */
 	UPROPERTY(BlueprintReadOnly, Category = "Fast Bake") FString Info;
+};
+
+/** One Black Eye camera of one shot, and the frames of it an edit shows. GetEditBakePlan returns these. */
+USTRUCT(BlueprintType)
+struct FBlackEyeShotBakePlan
+{
+	GENERATED_BODY()
+
+	UPROPERTY(BlueprintReadOnly, Category = "Fast Bake") TObjectPtr<ULevelSequence> Shot = nullptr;
+	UPROPERTY(BlueprintReadOnly, Category = "Fast Bake") FString CameraBindingName;
+	/** Shot display frames the edit shows, plus handles, merged and sorted. Pass as FBlackEyeFastBakeOptions::Ranges. */
+	UPROPERTY(BlueprintReadOnly, Category = "Fast Bake") TArray<FBlackEyeBakeRange> Ranges;
+	/** How many cinematic shot sections of the edit use this camera. */
+	UPROPERTY(BlueprintReadOnly, Category = "Fast Bake") int32 NumUses = 0;
 };
 
 /**
@@ -146,4 +187,13 @@ public:
 	/** Every baked Black Eye camera in the sequence: its twin, whether it's locked, and how it was baked. */
 	UFUNCTION(BlueprintCallable, Category = "Black Eye|Fast Bake")
 	static TArray<FBlackEyeBakeInfo> GetBakeInfo(ULevelSequence* Sequence);
+
+	/**
+	 * What an edit (a sequence cutting between shots on a Cinematic Shot track) needs baked: for every shot it shows,
+	 * the Black Eye camera on the shot's camera cuts and the shot frames the edit uses, widened by HandleFrames on
+	 * each side. Nested edits are followed; a shot's own Sub tracks (its scene) are not. Bake each entry with BakeShot
+	 * and its Ranges; the Sequencer toolbar's Fast Bake menu and BlackEyeCustom.FastBake.BakeEdit do all of them.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Black Eye|Fast Bake")
+	static TArray<FBlackEyeShotBakePlan> GetEditBakePlan(ULevelSequence* Edit, int32 HandleFrames);
 };

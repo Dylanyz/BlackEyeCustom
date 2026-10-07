@@ -78,6 +78,25 @@ namespace BlackEyeFastBake
 		return FFileHelper::SaveStringToFile(Out, *Path);
 	}
 
+	TArray<FBlackEyeBakeRange> NormalizeRanges(TArray<FBlackEyeBakeRange> Ranges)
+	{
+		Ranges.RemoveAll([](const FBlackEyeBakeRange& R) { return R.EndFrame <= R.StartFrame; });
+		Ranges.Sort([](const FBlackEyeBakeRange& A, const FBlackEyeBakeRange& B) { return A.StartFrame < B.StartFrame; });
+		TArray<FBlackEyeBakeRange> Out;
+		for (const FBlackEyeBakeRange& R : Ranges)
+		{
+			if (Out.Num() && R.StartFrame <= Out.Last().EndFrame)
+			{
+				Out.Last().EndFrame = FMath::Max(Out.Last().EndFrame, R.EndFrame);
+			}
+			else
+			{
+				Out.Add(R);
+			}
+		}
+		return Out;
+	}
+
 	/** Opens the sequence in Sequencer (ControlRigAssetActions.cpp:473-477 is the engine's own pattern). */
 	TSharedPtr<ISequencer> OpenSequencer(ULevelSequence* Sequence, FString& OutError)
 	{
@@ -322,13 +341,43 @@ FBlackEyeFastBakeReport BlackEyeFastBake::RunBake(ULevelSequence* Sequence, cons
 	const int32 PlaybackEnd = FFrameRate::TransformTime(FFrameTime(Playback.GetUpperBoundValue()), MovieScene.GetTickResolution(), DisplayRate).RoundToFrame().Value;
 	const int32 Start = Options.StartFrame != INDEX_NONE ? Options.StartFrame : PlaybackStart;
 	const int32 End = Options.EndFrame != INDEX_NONE ? Options.EndFrame : PlaybackEnd;
-	const int32 WarmUpStart = Start - FMath::Max(0, Options.WarmUpFrames);
+	const int32 WarmUp = FMath::Max(0, Options.WarmUpFrames);
 	const float Dt = static_cast<float>(DisplayRate.AsInterval());
-	if (End <= Start)
+
+	// What gets keyed: Options.Ranges (an edit's used frames plus handles), else [Start, End).
+	const TArray<FBlackEyeBakeRange> Keyed = NormalizeRanges(Options.Ranges.Num() ? Options.Ranges : TArray<FBlackEyeBakeRange>{ { Start, End } });
+	if (Keyed.Num() == 0)
 	{
 		Report.Message = FString::Printf(TEXT("empty range [%d, %d)"), Start, End);
 		return Report;
 	}
+	// What gets stepped: runs, each opening with the snap, the settle and the warm-up. Keyed spans closer together than
+	// the warm-up share a run, because stepping through the gap costs no more than a new warm-up and keeps the
+	// damping continuous, as playback would; the gap itself isn't keyed.
+	struct FRun { int32 Start; int32 End; };
+	TArray<FRun> Runs;
+	for (const FBlackEyeBakeRange& K : Keyed)
+	{
+		if (Runs.Num() && K.StartFrame - WarmUp <= Runs.Last().End)
+		{
+			Runs.Last().End = K.EndFrame;
+		}
+		else
+		{
+			Runs.Add({ K.StartFrame - WarmUp, K.EndFrame });
+		}
+	}
+	int32 Stepped = 0;
+	for (const FRun& Run : Runs)
+	{
+		Stepped += Run.End - Run.Start;
+	}
+	int32 RunStart = Runs[0].Start;
+	const int32 WarmUpStart = RunStart;
+	auto IsKeyed = [&Keyed](int32 Frame)
+	{
+		return Keyed.ContainsByPredicate([Frame](const FBlackEyeBakeRange& K) { return Frame >= K.StartFrame && Frame < K.EndFrame; });
+	};
 
 	FRestore Restore;
 	Restore.Sequencer = Sequencer;
@@ -369,12 +418,13 @@ FBlackEyeFastBakeReport BlackEyeFastBake::RunBake(ULevelSequence* Sequence, cons
 
 	TArray<USkeletalMeshComponent*> Meshes;
 	TArray<FSample> Samples;
-	Samples.Reserve(End - Start);
+	Samples.Reserve(Stepped);
 	double TEval = 0.0, TRefresh = 0.0, TTick = 0.0;
 	const double T0 = FPlatformTime::Seconds();
 
 	// Modal: a mouse button held over the viewport changes what LookAt does [4.5].
-	FScopedSlowTask Task(static_cast<float>(End - WarmUpStart), FText::FromString(FString::Printf(TEXT("Fast Bake: %s"), *Report.CameraLabel)));
+	FScopedSlowTask Task(static_cast<float>(Stepped), FText::FromString(FString::Printf(TEXT("Fast Bake: %s, %s%s"),
+		*Sequence->GetName(), *Report.CameraLabel, *Options.ProgressNote)));
 	Task.MakeDialog(true);
 
 	const int32 SubSteps = FMath::Max(1, Options.SubSteps);
@@ -395,7 +445,7 @@ FBlackEyeFastBakeReport BlackEyeFastBake::RunBake(ULevelSequence* Sequence, cons
 			++GFrameCounter;
 		}
 		double T = FPlatformTime::Seconds();
-		Evaluate(*Sequencer, MovieScene, (DebugFlags() & 16) ? FFrameTime(WarmUpStart) : Time);
+		Evaluate(*Sequencer, MovieScene, (DebugFlags() & 16) ? FFrameTime(RunStart) : Time);
 		{
 			const UE::Anim::FEvaluationForCachingScope CachingScope(StepDt);
 			FConstraintsManagerController::Get(World).EvaluateAllConstraints();
@@ -428,7 +478,7 @@ FBlackEyeFastBakeReport BlackEyeFastBake::RunBake(ULevelSequence* Sequence, cons
 		{
 			Meshes.Reset();
 		}
-		const bool bVerbose = CVarFastBakeVerbose.GetValueOnGameThread() > 0 && (Frame - WarmUpStart < 4 || Frame % 50 == 0);
+		const bool bVerbose = CVarFastBakeVerbose.GetValueOnGameThread() > 0 && (Frame - RunStart < 4 || Frame % 50 == 0);
 		for (USkeletalMeshComponent* Mesh : Meshes)
 		{
 			Restore.Touch(Mesh);
@@ -473,7 +523,7 @@ FBlackEyeFastBakeReport BlackEyeFastBake::RunBake(ULevelSequence* Sequence, cons
 			// The BEC override of AActor::Tick runs Follow then LookAt (BlackEyeCineCameraActorBase.cpp:124-150).
 			const FRotator CamBefore = Camera->GetCineCameraComponent()->GetComponentRotation();
 			Camera->Tick(StepDt);
-			if (CVarFastBakeVerbose.GetValueOnGameThread() > 0 && (Frame - WarmUpStart < 4 || Frame % 50 == 0))
+			if (CVarFastBakeVerbose.GetValueOnGameThread() > 0 && (Frame - RunStart < 4 || Frame % 50 == 0))
 			{
 				const FViewport* Active = GEditor ? GEditor->GetActiveViewport() : nullptr;
 				UE_LOG(LogBlackEyeCustom, Display, TEXT("[BlackEyeCustom] verbose f%d viewport %s %dx%d | actor yaw %.2f | camera yaw %.2f -> %.2f | focal %.2f"),
@@ -489,7 +539,8 @@ FBlackEyeFastBakeReport BlackEyeFastBake::RunBake(ULevelSequence* Sequence, cons
 		TTick += FPlatformTime::Seconds() - T;
 	};
 
-	for (int32 Frame = WarmUpStart; Frame < End; ++Frame)
+	for (const FRun& Run : Runs)
+	for (int32 Frame = RunStart = Run.Start; Frame < Run.End; ++Frame)
 	{
 		Task.EnterProgressFrame(1.f);
 		if (Task.ShouldCancel())
@@ -498,7 +549,7 @@ FBlackEyeFastBakeReport BlackEyeFastBake::RunBake(ULevelSequence* Sequence, cons
 			return Report;
 		}
 
-		if (Frame == WarmUpStart)
+		if (Frame == Run.Start)
 		{
 			Step(FFrameTime(Frame), Frame, true);
 			// The snap is one huge-dt tick and lands somewhere else than where Follow and LookAt settle (trap 4.15):
@@ -527,14 +578,13 @@ FBlackEyeFastBakeReport BlackEyeFastBake::RunBake(ULevelSequence* Sequence, cons
 			return Report;
 		}
 
-		if (Frame >= Start)
+		if (IsKeyed(Frame))
 		{
 			Samples.Add(Sample(Camera, Frame));
 		}
 	}
 
 	Report.TotalSeconds = FPlatformTime::Seconds() - T0;
-	const int32 Stepped = End - WarmUpStart;
 	Report.NumFrames = Samples.Num();
 	Report.MsPerFrame = 1000.0 * Report.TotalSeconds / Stepped;
 	Report.MsEvaluate = 1000.0 * TEval / Stepped;

@@ -15,7 +15,7 @@ reproduced here; the files cited ship with each product's source.
 | [3. The algorithm](#3-the-algorithm) | built |
 | [4. Traps](#4-traps) | 4.11-4.18 measured; 4.1 and 4.4 confirmed; the rest from source and review |
 | [5. Output: the baked twin, lock and unlock](#5-output-the-baked-twin-lock-and-unlock) | built, measured on a production edit |
-| [6. Entry points](#6-entry-points) | library and Sequencer menu built; Content Browser batch is P2 |
+| [6. Entry points](#6-entry-points) | library, Sequencer menu and Bake Edit built (Bake Edit measured on the repro 2026-10-07); folder batch is P2 |
 | [7. What becomes trivial inside Black Eye](#7-what-becomes-trivial-inside-black-eye) | planned |
 | [8. Measured numbers](#8-measured-numbers) | measured on the repro and on a production angle (P0); speed audit 2026-10-06 |
 | [9. Decisions and rejected ideas](#9-decisions-and-rejected-ideas) | live |
@@ -318,7 +318,40 @@ Not built yet: re-sync settings without re-baking (P2); keeping the previous bak
   big shot first spawns satisfied it after a single frame), the view restore does the same, and `BakeShot` from Python refuses
   (opens it, asks to run again) rather than editing a sequence opened in the same call. `BlackEyeCustom.FastBake.Bake
   <binding>` runs the menu's Bake and lock from the console; it replayed the crash case cleanly.
-- **Content Browser:** right-click shot Level Sequence(s) ▸ Bake Black Eye cameras, in batch (all angles at once).
+- **Bake an edit** (built 2026-10-07, `Private/FastBake/BlackEyeFastBakeEdit.cpp`). Asked for by a user whose edits
+  show a fraction of each long angle shot: bake every Black Eye camera an edit shows, only on the frames it shows,
+  with handles. Sequencer toolbar ▸ **Bake Edit**, Content Browser right-click on a Level Sequence ▸ **Black Eye: Bake
+  Edit...**, or `BlackEyeCustom.FastBake.BakeEdit [handles] [warmup] [keep] [lock]` (`EditPlan [handles]` only logs).
+  - **Planning** (`GetEditBakePlan`, no spawning). Walk the edit's Cinematic Shot tracks within its playback range,
+    skipping inactive sections, eval-disabled tracks and rows. Map each section's visible span into the inner
+    sequence with `UMovieSceneSubSection::OuterToInnerTransform().ComputeTraversedHull` (offset, time scale, loops,
+    tick resolution, inner time warp; `MovieSceneSequenceTransform.h:756`, `MovieSceneSubSection.cpp:308`). A sequence
+    whose camera cuts play a Black Eye camera (directly or through its twin, found by class from the spawnable
+    template or possessable class) is a shot: each overlapping cut gives that camera a used span. Any other sequence
+    is a nested edit, walked in turn (depth 8, no cycles). **Sub tracks are never followed:** inside an angle shot they
+    hold its scene, whose assembly may itself be a Cinematic Shot track into takes.
+  - **Handles** widen each used span on both sides, clamped to the camera cut (outside it that camera isn't shown),
+    then spans per shot camera are merged.
+  - **Stepping** (`RunBake` with `Ranges`): runs of keyed spans, each opening with the snap, the settle (trap 4.15)
+    and `WarmUpFrames` unkeyed frames. Spans closer than the warm-up share one run: stepping the gap costs no more
+    than a new warm-up and keeps the damping continuous, as playback would. Only frames inside a span are sampled.
+  - **One twin per camera, keys only where baked** (the user's choice). Between ranges the twin interpolates; that
+    is only visible when playing the shot itself, never through the edit.
+  - **Keep other keys** (`bKeepOtherKeys`, dialog default on): angle shots are shared by several edits (alternate
+    cuts), so a bake replaces keys only from first to last key of each baked range and keeps the rest; each new range's
+    rotation is shifted by whole turns to the old curve's winding there, or the twin would spin 360° at a seam.
+    Off, every key is replaced (the binding menu's full bake always replaces).
+  - **The batch** opens each shot alone (`BakeShot` needs it as root, §6 crash 2), bakes it, and returns to the edit at
+    the frame the user left. Settings persist per user (`EditorPerProjectUserSettings`, section
+    `BlackEyeCustom.FastBake.Edit`). Cancelling one bake's progress dialog stops the batch.
+  - **Accepted over-bake:** a section on a lower row partly hidden by one above is baked whole; it only costs frames.
+  - **Measured on the repro** (`Tools/fast_bake_edit_repro.py`, 2026-10-07): the plan for the three-cut edit and its
+    nested edit matched the hand-computed spans exactly ([20,90) + [190,240) and [40,80) + [190,240) at 10 handles);
+    the bake keyed exactly those frames (120, 0.43 ms/frame). Baking the nested edit on top with keep on replaced only
+    45-74 and 195-234 and left the rest; across the seams the per-frame position step stayed within 0.1 cm of its
+    neighbours. Not yet checked: the toolbar button and dialog by eye; a production master.
+- **Content Browser batch over a folder** (P2): right-click shot Level Sequence(s) ▸ Bake Black Eye cameras, whole
+  shots, all angles at once.
 - **`UBlackEyeFastBakeLibrary`** (built; BlueprintCallable, so Python and agents can drive it): `BakeShot(LS, Options)`,
   `SetLocked(LS, CameraBindingName, bool)`, `GetBakeInfo(LS)`, plus `BakeCameraToCsv` and the realtime record for
   measuring.
@@ -478,8 +511,8 @@ Control Rig, ~0.15 s).
   jumps more than a threshold in one frame (it would match the stepped view, not playback).
 - **P2 batch and UX:** Content Browser batch over a shots folder; bake info (date, range, BEC parameter hash); a stale
   flag when BEC tracks or subject sections change (reusing AutoBake's track-signature idea); re-sync settings.
-- **P3 speed** (only if P0 numbers need it): edit-aware partial bakes (only the ranges each shot is cut into, plus
-  warm-up); the shared subject cache across angles; AutoBake re-bake on change.
+- **Bake an edit:** *built 2026-10-07* (§6): the ranges each shot is cut into, plus handles and warm-up.
+- **P3 speed** (only if needed): the shared subject cache across angles; AutoBake re-bake on change.
 
 **The repro for the Black Eye team** (P1): a tiny map and sequence with a moving Manny, one BEC and a two-shot edit,
 showing the jolt and the fix in about two minutes. No MetaHumans, no project content.

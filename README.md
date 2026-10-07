@@ -13,7 +13,7 @@ own way inside Black Eye. It is an extension, not a fork: no Black Eye code is c
 
 | Extension | What it fixes | Status | Design |
 |---|---|---|---|
-| **Fast Bake** | Black Eye cameras jolt into frame at every cut when an edit is played in the editor, because their damping runs on wall-clock ticks, not the playhead. Fast Bake solves each camera offline, faster than realtime, into keys on a plain CineCamera "twin" in the same shot, and locks the shot to it (or unlocks it back to the live camera). | Working: Sequencer menu + Python. about 22x realtime on a minute of a production shot (2026-10-06); a locked edit plays without jolts | [docs/fast-bake/DESIGN.md](docs/fast-bake/DESIGN.md) |
+| **Fast Bake** | Black Eye cameras jolt into frame at every cut when an edit is played in the editor, because their damping runs on wall-clock ticks, not the playhead. Fast Bake solves each camera offline, faster than realtime, into keys on a plain CineCamera "twin" in the same shot, and locks the shot to it (or unlocks it back to the live camera). | Working: Sequencer menu, Bake Edit, Python. about 22x realtime on a minute of a production shot (2026-10-06); a locked edit plays without jolts | [docs/fast-bake/DESIGN.md](docs/fast-bake/DESIGN.md) |
 
 ## For the Black Eye team
 
@@ -33,10 +33,19 @@ Three places give the whole picture:
 - **In Sequencer:** open a shot, right-click the Black Eye camera's binding > **Black Eye Fast Bake** > **Bake and
   lock**. It bakes the whole playback range into `<camera>_Bake` and makes the shot's camera cuts play it. The same
   menu then offers **Unlock** (play the live camera) and **Lock**. Every action is one undo step.
+- **Bake an edit:** open an edit (a sequence cutting between shots on a Cinematic Shot track) and click **Bake Edit**
+  on the Sequencer toolbar, or right-click the edit in the Content Browser > **Black Eye: Bake Edit...**. A window
+  asks for **handles** (keyed frames either side of each cut, for trimming later), **warm-up** (unkeyed frames played
+  first, so the camera arrives moving as in playback) and whether to keep each twin's keys from other edits, and
+  lists what it would bake. Every Black Eye camera the edit shows is then baked on only the frames the edit uses, one
+  twin per camera, keyed only there. Nested edits are followed; a shot's own Sub tracks (its scene) are not. Console:
+  `BlackEyeCustom.FastBake.BakeEdit [handles] [warmup] [keep 0|1] [lock 0|1]`, `BlackEyeCustom.FastBake.EditPlan [handles]`.
 - **From Python:** `unreal.BlackEyeFastBakeLibrary.bake_shot(sequence, options)` (options: `camera_binding_name`,
-  `start_frame`, `end_frame`, `warm_up_frames`, `sub_steps`, `lock_after_bake`), `set_locked(sequence, name, bool)`,
-  `get_bake_info(sequence)`.
-- A frame range bakes only that range; outside it the twin holds its first and last keys. Bake the whole shot (the
+  `start_frame`, `end_frame`, `ranges`, `warm_up_frames`, `keep_other_keys`, `sub_steps`, `lock_after_bake`),
+  `get_edit_bake_plan(edit, handle_frames)` (each entry's `ranges` go straight into `options.ranges`),
+  `set_locked(sequence, name, bool)`, `get_bake_info(sequence)`.
+- A frame range bakes only that range; outside it, and between baked ranges, the twin interpolates between the
+  nearest keys. Bake the whole shot (the
   default) before relying on a lock everywhere. Starting mid-shot, give `warm_up_frames` (a few seconds) so the damping
   has settled.
 - Needs the editor with a level viewport (Black Eye's LookAt reads it). Nothing headless.
@@ -51,6 +60,8 @@ Three places give the whole picture:
    with `options = unreal.BlackEyeFastBakeOptions()` and `options.csv_path` set.
 3. For a live reference: `start_realtime_record(seq, "")`, play the sequence, then `stop_realtime_record(csv_path)`.
 4. `python Tools/compare_bake.py <realtime.csv> <bake.csv>` prints the differences (`docs/fast-bake/DESIGN.md` section 8).
+5. For Bake Edit, `Tools/fast_bake_edit_repro.py` adds an edit and a nested edit over the shot; its docstring gives
+   the frames each should key.
 
 ## Requirements
 

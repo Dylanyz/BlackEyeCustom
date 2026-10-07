@@ -1,15 +1,20 @@
 # Status and handoff (read first when picking up Fast Bake)
 
-Last updated 2026-10-06. The design and every measured number are in `docs/fast-bake/DESIGN.md`; this file says where
+Last updated 2026-10-07. The design and every measured number are in `docs/fast-bake/DESIGN.md`; this file says where
 things stand and what to do next.
 
 ## Phase
 
 - **P0 (spike, measurements): done.** DESIGN §8, §10.
 - **P1 (twin, lock/unlock, menu, undo): built and installed; the twin-tag fix (trap 4.17) installed and verified 2026-10-06.** DESIGN §5, §6.
+- **Bake Edit (bake only what an edit shows, with handles): built and installed 2026-10-07**, verified on the repro
+  (planner, bake, keep-other-keys, seams). DESIGN §6.
 - **P2 (batch, stale flag, re-sync settings): not started.** DESIGN §10.
 
 ## Open issues
+
+- Bake Edit: the Sequencer toolbar button and the dialog haven't been seen yet (computer use was denied while testing;
+  the code path ran through the console command). Then try it on a production master (with Dylan's say-so).
 
 - The Anim Mixer freeze (DESIGN trap 4.11) may have been the frozen frame counter too (trap 4.18). Re-test in the
   tester project without `-DisablePlugins`.
@@ -30,8 +35,6 @@ things stand and what to do next.
 
 ## Roadmap
 
-1. Optional: bake the union of the shot's playback range and every range its sections use (Dylan asked whether
-   only start/end is baked; it is).
-2. P2: Content Browser batch over a shots folder; stale flag (BEC tracks or subject sections changed since the bake);
+1. P2: Content Browser batch over a shots folder; stale flag (BEC tracks or subject sections changed since the bake);
    re-sync camera settings without re-baking.
-3. Speed (P3, only if needed): shared subject pass across angles (DESIGN §9).
+2. Speed (P3, only if needed): shared subject pass across angles (DESIGN §9).

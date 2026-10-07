@@ -45,6 +45,9 @@ namespace BlackEyeFastBake
 		TArray<FSample> Samples;
 	};
 
+	/** Sorted, empty spans dropped, overlapping or touching spans merged. */
+	TArray<FBlackEyeBakeRange> NormalizeRanges(TArray<FBlackEyeBakeRange> Ranges);
+
 	/** Opens the sequence in Sequencer as root and focused sequence, or explains why not. */
 	TSharedPtr<ISequencer> OpenSequencer(ULevelSequence* Sequence, FString& OutError);
 
@@ -61,7 +64,19 @@ namespace BlackEyeFastBake
 	/** Every baked camera in the sequence. */
 	TArray<FBlackEyeBakeInfo> GetBakeInfo(ULevelSequence* Sequence);
 
+	/** The edit's shots, cameras and used frames plus handles (BlackEyeFastBakeEdit.cpp). */
+	TArray<FBlackEyeShotBakePlan> GetEditBakePlan(ULevelSequence* Edit, int32 HandleFrames);
+
 	/** The Black Eye Fast Bake submenu on Sequencer's binding right-click menu (BlackEyeFastBakeMenu.cpp). */
 	void RegisterMenus();
 	void UnregisterMenus();
+
+	/** Bake an edit: Sequencer toolbar and Content Browser entries, the dialog (BlackEyeFastBakeEdit.cpp). */
+	void RegisterEditMenus();
+	void UnregisterEditMenus();
+
+	/** Shared with BlackEyeFastBakeEdit.cpp (BlackEyeFastBakeMenu.cpp). */
+	void Notify(const FText& Text, bool bSuccess);
+	void RunNextTick(TFunction<void()> Action);
+	void OpenThen(ULevelSequence* Sequence, TFunction<void()> Then);
 }

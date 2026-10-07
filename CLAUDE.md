@@ -56,8 +56,8 @@ to match one (trap 4.12).
 |---|---|
 | `BlackEyeCustom.uplugin` | one `Editor` module, Win64, `Installed: true`, no Black Eye dependency |
 | `Source/BlackEyeCustomEditor/` | `BlackEyeContract` (every Black Eye name + `RunSelfTest`), module + console command. Each extension adds a `Private/<Extension>/` folder |
-| `Source/.../Private/FastBake/`, `Public/BlackEyeFastBakeLibrary.h` | `BlackEyeFastBake.cpp` the bake loop (`RunBake`); `BlackEyeFastBakeTwin.cpp` the twin, lock/unlock, bake info; `BlackEyeFastBakeMenu.cpp` the Sequencer menu and console commands; library: `BakeShot`, `SetLocked`, `GetBakeInfo`, `BakeCameraToCsv`, `Start/StopRealtimeRecord` |
-| `Tools/fast_bake_repro.py`, `Tools/compare_bake.py` | builds the repro scene in any project; compares baked vs realtime tracks (plain Python) |
+| `Source/.../Private/FastBake/`, `Public/BlackEyeFastBakeLibrary.h` | `BlackEyeFastBake.cpp` the bake loop (`RunBake`); `BlackEyeFastBakeTwin.cpp` the twin, lock/unlock, bake info; `BlackEyeFastBakeMenu.cpp` the Sequencer menu and console commands; `BlackEyeFastBakeEdit.cpp` Bake Edit (plan, dialog, batch, toolbar and Content Browser entries); library: `BakeShot`, `SetLocked`, `GetBakeInfo`, `BakeCameraToCsv`, `Start/StopRealtimeRecord`, `GetEditBakePlan` |
+| `Tools/fast_bake_repro.py`, `Tools/fast_bake_edit_repro.py`, `Tools/compare_bake.py` | builds the repro scene in any project; adds an edit and a nested edit over it; compares baked vs realtime tracks (plain Python) |
 | `docs/<extension>/DESIGN.md` | one living design doc per extension; `docs/<extension>/data/` for measurements |
 | `Tools/` | `build_blackeyecustom.ps1` (package `%TEMP%\bcb`), `install_junction.ps1` |
 

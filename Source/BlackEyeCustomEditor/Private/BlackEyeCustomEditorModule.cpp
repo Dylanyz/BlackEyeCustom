@@ -21,12 +21,14 @@ public:
 	virtual void StartupModule() override
 	{
 		BlackEyeFastBake::RegisterMenus();
+		BlackEyeFastBake::RegisterEditMenus();
 	}
 
 	virtual void ShutdownModule() override
 	{
 		// A record left running would leave a world-tick delegate pointing into the unloaded module.
 		UBlackEyeFastBakeLibrary::StopRealtimeRecord(FString());
+		BlackEyeFastBake::UnregisterEditMenus();
 		BlackEyeFastBake::UnregisterMenus();
 	}
 };

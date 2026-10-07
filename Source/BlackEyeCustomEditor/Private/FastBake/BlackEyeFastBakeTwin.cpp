@@ -195,8 +195,73 @@ namespace BlackEyeFastBake
 		return Times;
 	}
 
+	/** Index spans [first, last] of samples on consecutive frames: one per baked range. */
+	TArray<TPair<int32, int32>> SampleRuns(const TArray<FSample>& Samples)
+	{
+		TArray<TPair<int32, int32>> Runs;
+		for (int32 i = 0; i < Samples.Num(); ++i)
+		{
+			if (Runs.Num() && Samples[i].Frame == Samples[i - 1].Frame + 1.0)
+			{
+				Runs.Last().Value = i;
+			}
+			else
+			{
+				Runs.Add({ i, i });
+			}
+		}
+		return Runs;
+	}
+
+	/**
+	 * The channel's keys become the new ones, plus (with bKeep) every old key outside the spans the new keys cover,
+	 * first to last key of each baked range. Old keys keep their own values and tangents.
+	 */
+	template <typename ChannelType, typename ValueType>
+	void MergeKeys(ChannelType& Channel, const TArray<FFrameNumber>& Times, TArray<ValueType>&& Values, const TArray<TPair<int32, int32>>& Runs, bool bKeep)
+	{
+		if (!bKeep || Channel.GetNumKeys() == 0)
+		{
+			Channel.Set(Times, MoveTemp(Values));
+			Channel.AutoSetTangents();
+			return;
+		}
+		auto Data = Channel.GetData();
+		const TArrayView<const FFrameNumber> OldTimes = Data.GetTimes();
+		const TArrayView<const ValueType> OldValues = Data.GetValues();
+		auto Replaced = [&](FFrameNumber T)
+		{
+			return Runs.ContainsByPredicate([&](const TPair<int32, int32>& R) { return T >= Times[R.Key] && T <= Times[R.Value]; });
+		};
+		TArray<FFrameNumber> OutTimes;
+		TArray<ValueType> OutValues;
+		OutTimes.Reserve(OldTimes.Num() + Times.Num());
+		OutValues.Reserve(OldTimes.Num() + Times.Num());
+		int32 Old = 0, New = 0;
+		while (Old < OldTimes.Num() || New < Times.Num())
+		{
+			if (Old < OldTimes.Num() && Replaced(OldTimes[Old]))
+			{
+				++Old;
+			}
+			else if (New < Times.Num() && (Old >= OldTimes.Num() || Times[New] <= OldTimes[Old]))
+			{
+				OutTimes.Add(Times[New]);
+				OutValues.Add(Values[New++]);
+			}
+			else
+			{
+				OutTimes.Add(OldTimes[Old]);
+				OutValues.Add(OldValues[Old++]);
+			}
+		}
+		Channel.Set(OutTimes, MoveTemp(OutValues));
+		Channel.AutoSetTangents();
+	}
+
 	// Auto-tangent cubic keys on every frame: smooth between frames, which matters for motion blur sub-samples.
-	void SetDoubleKeys(FMovieSceneDoubleChannel& Channel, const TArray<FFrameNumber>& Times, const TArray<double>& Values)
+	void SetDoubleKeys(FMovieSceneDoubleChannel& Channel, const TArray<FFrameNumber>& Times, const TArray<double>& Values,
+	                   const TArray<TPair<int32, int32>>& Runs, bool bKeep)
 	{
 		TArray<FMovieSceneDoubleValue> Keys;
 		Keys.Reserve(Values.Num());
@@ -207,11 +272,11 @@ namespace BlackEyeFastBake
 			Key.TangentMode = RCTM_Auto;
 			Keys.Add(Key);
 		}
-		Channel.Set(Times, MoveTemp(Keys));
-		Channel.AutoSetTangents();
+		MergeKeys(Channel, Times, MoveTemp(Keys), Runs, bKeep);
 	}
 
-	void SetFloatKeys(FMovieSceneFloatChannel& Channel, const TArray<FFrameNumber>& Times, const TArray<float>& Values)
+	void SetFloatKeys(FMovieSceneFloatChannel& Channel, const TArray<FFrameNumber>& Times, const TArray<float>& Values,
+	                  const TArray<TPair<int32, int32>>& Runs, bool bKeep)
 	{
 		TArray<FMovieSceneFloatValue> Keys;
 		Keys.Reserve(Values.Num());
@@ -222,8 +287,7 @@ namespace BlackEyeFastBake
 			Key.TangentMode = RCTM_Auto;
 			Keys.Add(Key);
 		}
-		Channel.Set(Times, MoveTemp(Keys));
-		Channel.AutoSetTangents();
+		MergeKeys(Channel, Times, MoveTemp(Keys), Runs, bKeep);
 	}
 
 	/** One fresh infinite section on a track, replacing whatever an earlier bake left there. */
@@ -236,6 +300,23 @@ namespace BlackEyeFastBake
 		Section->SetRange(TRange<FFrameNumber>::All());
 		Track->AddSection(*Section);
 		return Section;
+	}
+
+	/**
+	 * With bKeep, the track's one section as it is, so keys outside this bake survive (several edits baking parts of a
+	 * shot add up); otherwise, or if the track isn't one section, a fresh one.
+	 */
+	template <typename SectionType>
+	SectionType* KeepOrResetSection(UMovieSceneTrack* Track, bool bKeep)
+	{
+		const TArray<UMovieSceneSection*>& Sections = Track->GetAllSections();
+		SectionType* Existing = (bKeep && Sections.Num() == 1) ? Cast<SectionType>(Sections[0]) : nullptr;
+		if (Existing)
+		{
+			Existing->Modify();
+			return Existing;
+		}
+		return ResetToOneSection<SectionType>(Track);
 	}
 
 	UMovieSceneFloatTrack* FindOrAddFloatTrack(UMovieScene& MovieScene, const FGuid& Binding, FName Name, const FString& Path)
@@ -257,8 +338,10 @@ namespace BlackEyeFastBake
 	}
 
 	/** Twin camera component values as keys on its component binding (the binding Sequencer's UI would make). */
-	void WriteLensKeys(UMovieScene& MovieScene, const FGuid& ComponentBinding, const TArray<FFrameNumber>& Times, const TArray<FSample>& Samples)
+	void WriteLensKeys(UMovieScene& MovieScene, const FGuid& ComponentBinding, const TArray<FFrameNumber>& Times, const TArray<FSample>& Samples,
+	                   bool bKeep)
 	{
+		const TArray<TPair<int32, int32>> Runs = SampleRuns(Samples);
 		struct FLensChannel { FName Name; const TCHAR* Path; float FSample::* Member; };
 		const FLensChannel Channels[] = {
 			{ TEXT("CurrentFocalLength"), TEXT("CurrentFocalLength"), &FSample::FocalLength },
@@ -274,20 +357,21 @@ namespace BlackEyeFastBake
 				Values.Add(S.*C.Member);
 			}
 			UMovieSceneFloatTrack* Track = FindOrAddFloatTrack(MovieScene, ComponentBinding, C.Name, C.Path);
-			UMovieSceneFloatSection* Section = ResetToOneSection<UMovieSceneFloatSection>(Track);
-			SetFloatKeys(Section->GetChannel(), Times, Values);
+			UMovieSceneFloatSection* Section = KeepOrResetSection<UMovieSceneFloatSection>(Track, bKeep);
+			SetFloatKeys(Section->GetChannel(), Times, Values, Runs, bKeep);
 		}
 	}
 
 	/** The twin actor's transform: the Black Eye camera component's world transform, rotation unwound. */
-	void WriteTransformKeys(UMovieScene& MovieScene, const FGuid& Twin, const TArray<FFrameNumber>& Times, const TArray<FSample>& Samples)
+	void WriteTransformKeys(UMovieScene& MovieScene, const FGuid& Twin, const TArray<FFrameNumber>& Times, const TArray<FSample>& Samples,
+	                        bool bKeep)
 	{
 		UMovieScene3DTransformTrack* Track = MovieScene.FindTrack<UMovieScene3DTransformTrack>(Twin);
 		if (!Track)
 		{
 			Track = MovieScene.AddTrack<UMovieScene3DTransformTrack>(Twin);
 		}
-		UMovieScene3DTransformSection* Section = ResetToOneSection<UMovieScene3DTransformSection>(Track);
+		UMovieScene3DTransformSection* Section = KeepOrResetSection<UMovieScene3DTransformSection>(Track, bKeep);
 		TArrayView<FMovieSceneDoubleChannel*> Ch = Section->GetChannelProxy().GetChannels<FMovieSceneDoubleChannel>();
 		if (Ch.Num() < 9)
 		{
@@ -308,9 +392,27 @@ namespace BlackEyeFastBake
 			V[0].Add(L.X); V[1].Add(L.Y); V[2].Add(L.Z);
 			V[3].Add(R.Roll); V[4].Add(R.Pitch); V[5].Add(R.Yaw); // channel order: Rotation X, Y, Z
 		}
+		const TArray<TPair<int32, int32>> Runs = SampleRuns(Samples);
+		// Kept keys next to a new range must be on the same winding, or the twin spins 360 deg between them: shift
+		// each range by the whole turns that bring it nearest the old curve there.
+		for (int32 i = 3; i < 6 && bKeep; ++i)
+		{
+			for (const TPair<int32, int32>& Run : Runs)
+			{
+				double Old = 0.0;
+				if (Ch[i]->GetNumKeys() > 0 && Ch[i]->Evaluate(Times[Run.Key], Old))
+				{
+					const double Turns = 360.0 * FMath::RoundToDouble((Old - V[i][Run.Key]) / 360.0);
+					for (int32 k = Run.Key; k <= Run.Value; ++k)
+					{
+						V[i][k] += Turns;
+					}
+				}
+			}
+		}
 		for (int32 i = 0; i < 6; ++i)
 		{
-			SetDoubleKeys(*Ch[i], Times, V[i]);
+			SetDoubleKeys(*Ch[i], Times, V[i], Runs, bKeep);
 		}
 		for (int32 i = 6; i < 9; ++i)
 		{
@@ -469,8 +571,22 @@ bool BlackEyeFastBake::WriteTwin(ULevelSequence* Sequence, const FBlackEyeFastBa
 
 	// How it was baked, for GetBakeInfo and the stale check (P2): saved into the template with everything else.
 	const TSharedPtr<IPlugin> BE = IPluginManager::Get().FindEnabledPlugin(TEXT("Black_Eye"));
-	const FString Info = FString::Printf(TEXT("baked %s; frames %.0f-%.0f; substeps %d; warmup %d; black eye %s; components copied: %s"),
-		*FDateTime::Now().ToString(TEXT("%Y-%m-%d %H:%M")), Bake.Samples[0].Frame, Bake.Samples.Last().Frame,
+	FString Frames;
+	const TArray<TPair<int32, int32>> Runs = SampleRuns(Bake.Samples);
+	for (int32 i = 0; i < Runs.Num() && i < 8; ++i)
+	{
+		Frames += FString::Printf(TEXT("%s%.0f-%.0f"), i ? TEXT(", ") : TEXT(""), Bake.Samples[Runs[i].Key].Frame, Bake.Samples[Runs[i].Value].Frame);
+	}
+	if (Runs.Num() > 8)
+	{
+		Frames += FString::Printf(TEXT(" and %d more"), Runs.Num() - 8);
+	}
+	if (Options.bKeepOtherKeys)
+	{
+		Frames += TEXT(" (earlier keys outside kept)");
+	}
+	const FString Info = FString::Printf(TEXT("baked %s; frames %s; substeps %d; warmup %d; black eye %s; components copied: %s"),
+		*FDateTime::Now().ToString(TEXT("%Y-%m-%d %H:%M")), *Frames,
 		FMath::Max(1, Options.SubSteps), FMath::Max(0, Options.WarmUpFrames), BE.IsValid() ? *BE->GetDescriptor().VersionName : TEXT("?"),
 		Extra.Num() ? *FString::Join(Extra, TEXT(", ")) : TEXT("none"));
 	Spawned->Tags.RemoveAll([](const FName& Tag) { return Tag.ToString().StartsWith(InfoTagPrefix); });
@@ -484,7 +600,7 @@ bool BlackEyeFastBake::WriteTwin(ULevelSequence* Sequence, const FBlackEyeFastBa
 	Sequencer.GetSpawnRegister().DestroySpawnedObject(Twin, Sequencer.GetFocusedTemplateID(), Sequencer.GetSharedPlaybackState());
 	Sequencer.ForceEvaluate();
 	const TArray<FFrameNumber> Times = KeyTimes(MovieScene, Bake.Samples);
-	WriteTransformKeys(MovieScene, Twin, Times, Bake.Samples);
+	WriteTransformKeys(MovieScene, Twin, Times, Bake.Samples, Options.bKeepOtherKeys);
 
 	Spawned = nullptr;
 	for (const TWeakObjectPtr<>& Bound : Sequencer.FindBoundObjects(Twin, Sequencer.GetFocusedTemplateID()))
@@ -497,7 +613,7 @@ bool BlackEyeFastBake::WriteTwin(ULevelSequence* Sequence, const FBlackEyeFastBa
 		Report.Message = TEXT("twin written without lens keys: its camera component could not be bound (is it spawned at the current time?)");
 		return false;
 	}
-	WriteLensKeys(MovieScene, CameraComponentBinding, Times, Bake.Samples);
+	WriteLensKeys(MovieScene, CameraComponentBinding, Times, Bake.Samples, Options.bKeepOtherKeys);
 
 	if (Options.bLockAfterBake)
 	{
