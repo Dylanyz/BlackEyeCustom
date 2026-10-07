@@ -453,10 +453,38 @@ Not built yet: re-sync settings without re-baking (P2); keeping the previous bak
     - Not measured: the Content Browser entry (synthetic right-clicks don't open its menu); the first editor frame
       after a master bake on a production master (writing twins changes the shots, which Sequencer recompiles on its
       next tick, `Sequencer.cpp:1118-1126`; hypothesis: per shot, not the master's minutes).
+  - **Shot list, delete, whole shots** (*built 2026-10-07, not yet run in the editor*). Dylan, 2026-10-07: in a master
+    he wants to *"switch all of my sections at once to unlock and use the black eye"*, to delete the bakes of a whole
+    sequence in bulk, the same from the Content Browser, and from a selected section *"the option to bake the entire
+    sequence"*. All of it reuses the scope, so every way in gets it (no second panel):
+    - **Shot list** (`MakeShotsBox`, `FBakeScope::Rows`): when the window covers more than one shot (an edit, its
+      selected sections, several sequences), one row per shot camera with what its cuts play now
+      (`DescribeCutPlay`), Lock / Unlock / Delete on the row and **Lock all / Unlock all / Delete all**. Rows come from
+      the same walk as the plan (`Collect`): an edit's shots where it shows them, a shot's Black Eye cameras that are
+      on a cut or have a bake. A row's lock plays its current bake camera (the one its cuts play, else the newest);
+      rows without one are skipped. **Only what's selected** (on by default, Dylan's choice): with sections selected,
+      lock / unlock change only the frames they show (`LockSpan` per merged span); off, whole shots. Every "all" is
+      one undo step (nested transactions merge). Hidden when the one-shot controls cover the scope.
+    - **Delete** (`DeleteShotCameraTwins`): unlocks first (cuts on the deleted twins play the camera again), then
+      deletes each twin the way Sequencer's own Delete does: untag (`ObjectBindingModel.cpp:1135-1148`), its child
+      bindings (the camera component) with their tracks, out of folders, `RemoveSpawnable` and the spawned copies
+      destroyed in every open Sequencer showing the shot (`SpawnableModel.cpp:102-116`); a custom-binding twin goes
+      through `RemovePossessable` + `UnbindPossessableObjects` (`PossessableModel.cpp:217-248`). Row and one-shot
+      Delete remove the current bake camera only, so "Create new +" alternates survive; **Delete all** removes every
+      bake camera of each camera and its whole tag, dead IDs included (Dylan's choice). Always the whole twin: a bake
+      belongs to the shot, so "only what's selected" doesn't apply. Asks first; one undo step.
+    - **Their whole shots**: a third scope choice beside Selected sections / Whole edit. Each selected section's shot
+      (nested edits followed) is planned as if it were open on its own (`FShotTarget::Plan(..., bWholeShot)`: its
+      cuts within its playback range) but still reached through its section, so a master bake bakes it in place:
+      the shot's instance is evaluated alone and reaches frames outside the section, as handles already do
+      (`BlackEyeFastBakeMaster.cpp`, `OverrideRootSequence`). Console: `selected 2`.
+    - **Content Browser**: Black Eye: Lock Bakes / Unlock Bakes / Delete Bakes... on one or several sequences, the
+      same row actions without the window (edits where they show each shot, shots' cameras).
+    - Library: `DeleteBakes(LS, CameraBindingName)` (empty name: every baked camera).
 - **Content Browser batch over a folder** (P2): right-click shot Level Sequence(s) ▸ Bake Black Eye cameras, whole
   shots, all angles at once.
 - **`UBlackEyeFastBakeLibrary`** (built; BlueprintCallable, so Python and agents can drive it): `BakeShot(LS, Options)`,
-  `SetLocked(LS, CameraBindingName, bool)`, `GetBakeInfo(LS)`, plus `BakeCameraToCsv` and the realtime record for
+  `SetLocked(LS, CameraBindingName, bool)`, `DeleteBakes(LS, CameraBindingName)`, `GetBakeInfo(LS)`, plus `BakeCameraToCsv` and the realtime record for
   measuring.
 - **`BlackEyeCustom.SelfTest`** console command (built: checks the Black Eye contract, §3).
 

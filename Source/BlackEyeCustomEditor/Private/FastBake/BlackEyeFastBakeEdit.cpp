@@ -17,6 +17,7 @@
 #include "ISequencer.h"
 #include "LevelSequence.h"
 #include "Misc/ConfigCacheIni.h"
+#include "Misc/MessageDialog.h"
 #include "MovieScene.h"
 #include "MovieSceneCommonHelpers.h"
 #include "Sections/MovieSceneCameraCutSection.h"
@@ -445,8 +446,11 @@ namespace BlackEyeFastBake
 				Twin = C ? C->Twins.IndexOfByKey(C->DefaultTwin) : INDEX_NONE;
 			}
 
-			/** This shot's plan entry for the chosen camera and bake camera, from the edit's plan or the shot's own cuts. */
-			TArray<FBlackEyeShotBakePlan> Plan(TArray<FBlackEyeShotBakePlan> EditPlans, bool bSettleAtCut) const
+			/**
+			 * This shot's plan entry for the chosen camera and bake camera, from the edit's plan or the shot's own cuts.
+			 * bWholeShot: the shot's own cuts at full length, as if it were open on its own, even from a section.
+			 */
+			TArray<FBlackEyeShotBakePlan> Plan(TArray<FBlackEyeShotBakePlan> EditPlans, bool bSettleAtCut, bool bWholeShot = false) const
 			{
 				ULevelSequence* ShotSequence = Shot.Get();
 				const FShotCamera* C = Current();
@@ -454,7 +458,7 @@ namespace BlackEyeFastBake
 				{
 					return {};
 				}
-				FBlackEyeShotBakePlan* Found = EditPlans.FindByPredicate([&](const FBlackEyeShotBakePlan& P) { return P.Shot == ShotSequence && P.CameraBindingName == C->Name; });
+				FBlackEyeShotBakePlan* Found = bWholeShot ? nullptr : EditPlans.FindByPredicate([&](const FBlackEyeShotBakePlan& P) { return P.Shot == ShotSequence && P.CameraBindingName == C->Name; });
 				FBlackEyeShotBakePlan Plan;
 				if (Found)
 				{
@@ -465,7 +469,8 @@ namespace BlackEyeFastBake
 					// The shot open on its own, or a camera the section's cuts don't play: the camera's cuts within the
 					// shot's playback range (the section's frames when there is one), else all of it.
 					const UMovieScene* MovieScene = ShotSequence->GetMovieScene();
-					const TRange<FFrameNumber> Window = TRange<FFrameNumber>::Intersection(MovieScene->GetPlaybackRange(), SectionTicks);
+					const TRange<FFrameNumber> Window = TRange<FFrameNumber>::Intersection(MovieScene->GetPlaybackRange(),
+						bWholeShot ? TRange<FFrameNumber>::All() : SectionTicks);
 					auto ToDisplay = [MovieScene](FFrameNumber Tick, bool bCeil)
 					{
 						const FFrameTime T = FFrameRate::TransformTime(FFrameTime(Tick), MovieScene->GetTickResolution(), MovieScene->GetDisplayRate());
@@ -566,6 +571,67 @@ namespace BlackEyeFastBake
 		}
 
 		/**
+		 * One Black Eye camera of one shot in a scope, for the window's shot list: lock, unlock and delete act on these.
+		 * Spans: the shot ticks the selected sections show; empty, or "only what's selected" off, means the whole shot.
+		 */
+		struct FBakeRow
+		{
+			TWeakObjectPtr<ULevelSequence> Shot;
+			FGuid Camera;
+			TArray<TRange<FFrameNumber>> Spans;
+			FString Status; // what its cuts play now (DescribeCutPlay), refreshed after each action
+			int32 NumTwins = 0;
+
+			FString Label() const
+			{
+				const ULevelSequence* S = Shot.Get();
+				return S ? S->GetName() + TEXT("  /  ") + S->GetMovieScene()->GetObjectDisplayName(Camera).ToString() : FString();
+			}
+
+			/** The bake camera lock plays and a row's delete removes: the one its cuts play, else the newest. */
+			FGuid DefaultTwin() const
+			{
+				const ULevelSequence* S = Shot.Get();
+				if (S)
+				{
+					for (const FTwin& Twin : FindTwins(*S->GetMovieScene()))
+					{
+						if (Twin.Camera == Camera)
+						{
+							return BlackEyeFastBake::DefaultTwin(*S->GetMovieScene(), Twin);
+						}
+					}
+				}
+				return FGuid();
+			}
+
+			void Refresh(bool bOnlySelected)
+			{
+				const ULevelSequence* S = Shot.Get();
+				NumTwins = 0;
+				Status.Reset();
+				if (!S)
+				{
+					return;
+				}
+				for (const FTwin& Twin : FindTwins(*S->GetMovieScene()))
+				{
+					NumTwins += Twin.Camera == Camera ? Twin.Alive.Num() : 0;
+				}
+				TRange<FFrameNumber> Hull = TRange<FFrameNumber>::All();
+				if (bOnlySelected && Spans.Num())
+				{
+					Hull = Spans[0];
+					for (const TRange<FFrameNumber>& Span : Spans)
+					{
+						Hull = TRange<FFrameNumber>::Hull(Hull, Span);
+					}
+				}
+				Status = DescribeCutPlay(*S->GetMovieScene(), Camera, Hull);
+			}
+		};
+
+		/**
 		 * What one Bake Edit covers: the whole edit, or the sections selected in it. Every entry point builds one and
 		 * hands it to the same dialog and batch, so the two ways in never drift apart.
 		 */
@@ -575,7 +641,9 @@ namespace BlackEyeFastBake
 			TArray<TWeakObjectPtr<UMovieSceneSubSection>> Selected; // its selected shot sections, maybe none
 			TWeakObjectPtr<ULevelSequence> ReturnTo;                // the Sequencer's root when started, reopened at the end
 			bool bSelectedOnly = false;
+			bool bWholeShots = false;                               // with bSelectedOnly: the selected sections' shots at full length
 			TSharedPtr<FShotTarget> Target;                         // one shot's controls, when the scope is about one shot
+			int32 Generation = 0;                                   // bumped when lock / delete change the shots: re-plan
 			TWeakPtr<ISequencer> Sequencer;                         // where it was opened from, refreshed after lock / unlock
 			TArray<TWeakObjectPtr<ULevelSequence>> Many;            // several sequences picked in the Content Browser
 
@@ -642,7 +710,33 @@ namespace BlackEyeFastBake
 					return {}; // every selected section is gone
 				}
 				TArray<FBlackEyeShotBakePlan> Plans = GetEditBakePlan(Edit.Get(), HeadFrames, TailFrames, bSettleAtCut, Only);
-				return TargetBakes() ? Target->Plan(MoveTemp(Plans), bSettleAtCut) : Plans;
+				const bool bWhole = bSelectedOnly && bWholeShots;
+				if (TargetBakes())
+				{
+					return Target->Plan(MoveTemp(Plans), bSettleAtCut, bWhole);
+				}
+				if (bWhole)
+				{
+					// Each shot the sections show (nested edits followed), at full length, still reached through its
+					// section so a master bake finds its instance.
+					for (FBlackEyeShotBakePlan& Plan : Plans)
+					{
+						const int32 NumUses = Plan.NumUses;
+						const TWeakObjectPtr<UMovieSceneSubSection> First = Plan.FirstSection;
+						FShotTarget Whole;
+						Whole.Shot = Plan.Shot;
+						Whole.Cameras = ListShotCameras(Plan.Shot);
+						Whole.Camera = Whole.Cameras.IndexOfByPredicate([&Plan](const FShotCamera& C) { return C.Name == Plan.CameraBindingName; });
+						const TArray<FBlackEyeShotBakePlan> One = Whole.Plan({}, bSettleAtCut, true);
+						if (One.Num())
+						{
+							Plan.Ranges = One[0].Ranges;
+						}
+						Plan.NumUses = NumUses;
+						Plan.FirstSection = First;
+					}
+				}
+				return Plans;
 			}
 
 			FString Describe() const
@@ -656,7 +750,99 @@ namespace BlackEyeFastBake
 				{
 					return FString::Printf(TEXT("shot %s"), *Name);
 				}
-				return bSelectedOnly ? FString::Printf(TEXT("%d selected section(s) of %s"), Selected.Num(), *Name) : Name;
+				if (bSelectedOnly)
+				{
+					return bWholeShots ? FString::Printf(TEXT("the whole shots of %d selected section(s) of %s"), Selected.Num(), *Name)
+					                   : FString::Printf(TEXT("%d selected section(s) of %s"), Selected.Num(), *Name);
+				}
+				return Name;
+			}
+
+			/**
+			 * The shot cameras this scope covers, for lock / unlock / delete: an edit's shots where it shows them (the
+			 * selected sections', or the whole edit's), a shot's Black Eye cameras that are on a cut or have a bake.
+			 */
+			TArray<FBakeRow> Rows() const
+			{
+				TArray<FBakeRow> Out;
+				auto Add = [&Out](ULevelSequence* Shot, const FGuid& Camera, const TRange<FFrameNumber>* Span)
+				{
+					FBakeRow* Row = Out.FindByPredicate([&](const FBakeRow& R) { return R.Shot == Shot && R.Camera == Camera; });
+					if (!Row)
+					{
+						Row = &Out.AddDefaulted_GetRef();
+						Row->Shot = Shot;
+						Row->Camera = Camera;
+					}
+					if (Span)
+					{
+						Row->Spans.Add(*Span);
+					}
+				};
+				auto AddShot = [&Add](ULevelSequence* Shot)
+				{
+					for (const FShotCamera& C : ListShotCameras(Shot))
+					{
+						if (C.bOnCut || C.Twins.Num())
+						{
+							Add(Shot, C.Camera, nullptr);
+						}
+					}
+				};
+				auto AddEdit = [&Add](ULevelSequence* Sequence, TConstArrayView<const UMovieSceneSubSection*> Only, bool bSpans)
+				{
+					TArray<FUse> Uses;
+					TArray<ULevelSequence*> Path{ Sequence };
+					Collect(Sequence, Only.Num() ? TRange<FFrameNumber>::All() : Sequence->GetMovieScene()->GetPlaybackRange(), 0, Path, Uses, Only);
+					for (const FUse& Use : Uses)
+					{
+						if (ULevelSequence* Shot = Use.Shot.Get())
+						{
+							Add(Shot, Use.Camera, bSpans ? &Use.Ticks : nullptr);
+						}
+					}
+				};
+				auto AddSequence = [&](ULevelSequence* Sequence)
+				{
+					if (Sequence)
+					{
+						if (HasShotTrack(Sequence))
+						{
+							AddEdit(Sequence, {}, false);
+						}
+						else
+						{
+							AddShot(Sequence);
+						}
+					}
+				};
+				if (IsMany())
+				{
+					for (const TWeakObjectPtr<ULevelSequence>& Weak : Many)
+					{
+						AddSequence(Weak.Get());
+					}
+				}
+				else if (bSelectedOnly && Selected.Num() && Edit.IsValid())
+				{
+					TArray<const UMovieSceneSubSection*> Only;
+					for (const TWeakObjectPtr<UMovieSceneSubSection>& Section : Selected)
+					{
+						if (Section.IsValid())
+						{
+							Only.Add(Section.Get());
+						}
+					}
+					if (Only.Num())
+					{
+						AddEdit(Edit.Get(), Only, !bWholeShots);
+					}
+				}
+				else
+				{
+					AddSequence(Edit.Get());
+				}
+				return Out;
 			}
 		};
 
@@ -688,6 +874,121 @@ namespace BlackEyeFastBake
 			Scope.bSelectedOnly = Scope.Selected.Num() > 0;
 			Scope.Sequencer = Sequencer.AsShared();
 			return Scope;
+		}
+
+		/** Every open Sequencer redraws and re-evaluates: lock, unlock and delete change shots any of them may show. */
+		void RefreshSequencers()
+		{
+			OpenSequencers.RemoveAll([](const TWeakPtr<ISequencer>& S) { return !S.IsValid(); });
+			for (const TWeakPtr<ISequencer>& Weak : OpenSequencers)
+			{
+				if (const TSharedPtr<ISequencer> Sequencer = Weak.Pin())
+				{
+					Sequencer->NotifyMovieSceneDataChanged(EMovieSceneDataChangeType::MovieSceneStructureItemsChanged);
+					Sequencer->ForceEvaluate();
+				}
+			}
+		}
+
+		/** Sorted, overlapping and touching spans merged, so a shot shown by several sections is split once per edge. */
+		TArray<TRange<FFrameNumber>> MergeSpans(TArray<TRange<FFrameNumber>> Spans)
+		{
+			Spans.Sort([](const TRange<FFrameNumber>& A, const TRange<FFrameNumber>& B) { return A.GetLowerBoundValue() < B.GetLowerBoundValue(); });
+			TArray<TRange<FFrameNumber>> Out;
+			for (const TRange<FFrameNumber>& Span : Spans)
+			{
+				if (Out.Num() && Span.GetLowerBoundValue() <= Out.Last().GetUpperBoundValue())
+				{
+					Out.Last() = TRange<FFrameNumber>::Hull(Out.Last(), Span);
+				}
+				else
+				{
+					Out.Add(Span);
+				}
+			}
+			return Out;
+		}
+
+		enum class ERowsAction { Lock, Unlock, Delete, DeleteAll };
+
+		/**
+		 * Lock, unlock or delete on shot rows, one undo step for them all (nested transactions merge). Lock plays each
+		 * row's current bake camera; Delete removes that one, DeleteAll every bake camera of the row's camera, after
+		 * asking. bOnlySelected: lock and unlock act on the rows' spans only. Returns false when the user cancelled.
+		 */
+		bool RunRowsAction(TArrayView<FBakeRow> Rows, ERowsAction Action, bool bOnlySelected, const FString& Describe)
+		{
+			const bool bDelete = Action == ERowsAction::Delete || Action == ERowsAction::DeleteAll;
+			int32 Bakes = 0, Shots = 0;
+			TSet<const ULevelSequence*> ShotSet;
+			for (FBakeRow& Row : Rows)
+			{
+				Row.Refresh(bOnlySelected);
+				if (Row.NumTwins)
+				{
+					Bakes += Action == ERowsAction::DeleteAll ? Row.NumTwins : 1;
+					ShotSet.Add(Row.Shot.Get());
+				}
+			}
+			Shots = ShotSet.Num();
+			if (Bakes == 0)
+			{
+				Notify(FText::Format(LOCTEXT("NoBakes", "{0}: no bake to {1}"), FText::FromString(Describe),
+					bDelete ? LOCTEXT("VerbDelete", "delete") : Action == ERowsAction::Lock ? LOCTEXT("VerbLock", "lock") : LOCTEXT("VerbUnlock", "unlock")), false);
+				return true;
+			}
+			if (bDelete && FMessageDialog::Open(EAppMsgType::OkCancel, FText::Format(
+				LOCTEXT("ConfirmDelete", "Delete {0} bake camera(s) in {1} shot(s)?\n\nTheir camera cuts go back to the live Black Eye camera "
+				                         "first. A shot's bake is gone from every edit that uses the shot. Edit > Undo brings it back."),
+				Bakes, Shots)) != EAppReturnType::Ok)
+			{
+				return false;
+			}
+			int32 Done = 0, Changed = 0;
+			{
+				const FScopedTransaction Transaction(bDelete ? LOCTEXT("DeleteRows", "Delete Black Eye bakes")
+					: Action == ERowsAction::Lock ? LOCTEXT("LockRows", "Lock Black Eye bakes") : LOCTEXT("UnlockRows", "Unlock Black Eye bakes"));
+				for (FBakeRow& Row : Rows)
+				{
+					ULevelSequence* Shot = Row.Shot.Get();
+					const FGuid Twin = Row.DefaultTwin();
+					if (!Shot || !Twin.IsValid())
+					{
+						continue;
+					}
+					if (bDelete)
+					{
+						Done += DeleteShotCameraTwins(Shot, Row.Camera, Action == ERowsAction::DeleteAll ? TConstArrayView<FGuid>() : TConstArrayView<FGuid>(&Twin, 1));
+						continue;
+					}
+					const bool bLock = Action == ERowsAction::Lock;
+					const int32 Before = Changed;
+					if (bOnlySelected && Row.Spans.Num())
+					{
+						for (const TRange<FFrameNumber>& Span : MergeSpans(Row.Spans))
+						{
+							Changed += SetShotCameraLock(Shot, Row.Camera, Twin, bLock, Span);
+						}
+					}
+					else
+					{
+						Changed += SetShotCameraLock(Shot, Row.Camera, Twin, bLock, TRange<FFrameNumber>::All());
+					}
+					Done += Changed > Before ? 1 : 0;
+				}
+			}
+			for (FBakeRow& Row : Rows)
+			{
+				Row.Refresh(bOnlySelected);
+			}
+			RefreshSequencers();
+			const FText Text = bDelete
+				? FText::Format(LOCTEXT("DeletedRows", "{0}: {1} bake camera(s) deleted"), FText::FromString(Describe), Done)
+				: FText::Format(LOCTEXT("LockedRows", "{0}: {1} shot camera(s) now play {2} ({3} camera cut(s) changed)"), FText::FromString(Describe), Done,
+					Action == ERowsAction::Lock ? LOCTEXT("PlayBake", "the bake") : LOCTEXT("PlayLive", "the live Black Eye camera"), Changed);
+			UE_LOG(LogBlackEyeCustom, Display, TEXT("[BlackEyeCustom] %s"), *Text.ToString());
+			Notify(Text, true);
+			return true;
 		}
 
 		FText Summary(const FString& Scope, const TCHAR* How, int32 Baked, int32 Total, int32 Keyed, double Seconds, bool bCancelled,
@@ -950,25 +1251,51 @@ namespace BlackEyeFastBake
 			RefreshStatus();
 			auto Text = [](TSharedPtr<FString> Item) -> TSharedRef<SWidget> { return SNew(STextBlock).Text(FText::FromString(Item.IsValid() ? *Item : FString())); };
 
-			auto SetLock = [Scope, Target, RefreshStatus, RebuildTwins](bool bLock)
+			// After lock, unlock or delete: which bake camera is "current" may have changed, or be gone; the list's order doesn't.
+			auto AfterChange = [Scope, Target, RefreshStatus, RebuildTwins](bool bTwinGone)
 			{
-				const FShotCamera* C = Target->Current();
-				const int32 Changed = C ? SetShotCameraLock(Target->Shot.Get(), C->Camera, Target->TwinGuid(), bLock, Target->LockSpan()) : 0;
-				// Which bake camera is "current" may have changed; the list's order doesn't.
 				const TArray<FShotCamera> Fresh = ListShotCameras(Target->Shot.Get());
 				if (Fresh.Num() == Target->Cameras.Num())
 				{
 					Target->Cameras = Fresh;
+					if (bTwinGone)
+					{
+						Target->PickDefaultTwin();
+					}
 					RebuildTwins();
 				}
-				if (const TSharedPtr<ISequencer> Sequencer = Scope->Sequencer.Pin())
-				{
-					Sequencer->NotifyMovieSceneDataChanged(EMovieSceneDataChangeType::MovieSceneStructureItemsChanged);
-					Sequencer->ForceEvaluate();
-				}
+				RefreshSequencers();
 				RefreshStatus();
+				++Scope->Generation;
+			};
+			auto SetLock = [Target, AfterChange](bool bLock)
+			{
+				const FShotCamera* C = Target->Current();
+				const int32 Changed = C ? SetShotCameraLock(Target->Shot.Get(), C->Camera, Target->TwinGuid(), bLock, Target->LockSpan()) : 0;
+				AfterChange(false);
 				UE_LOG(LogBlackEyeCustom, Display, TEXT("[BlackEyeCustom] %s %s: %d camera cut section(s) changed"),
 					bLock ? TEXT("lock") : TEXT("unlock"), *GetNameSafe(Target->Shot.Get()), Changed);
+				return FReply::Handled();
+			};
+			// The bake camera picked above, after asking: its cuts play the live camera again, then it is deleted.
+			auto DeleteTwin = [Target, MovieScene, AfterChange]()
+			{
+				const FShotCamera* C = Target->Current();
+				const FGuid Twin = Target->TwinGuid();
+				if (!C || !Twin.IsValid() || !MovieScene)
+				{
+					return FReply::Handled();
+				}
+				if (FMessageDialog::Open(EAppMsgType::OkCancel, FText::Format(
+					LOCTEXT("ConfirmDeleteOne", "Delete the bake camera {0} from {1}?\n\nIts camera cuts go back to the live Black Eye camera "
+					                            "first. It is gone from every edit that uses this shot. Edit > Undo brings it back."),
+					MovieScene->GetObjectDisplayName(Twin), FText::FromString(GetNameSafe(Target->Shot.Get())))) != EAppReturnType::Ok)
+				{
+					return FReply::Handled();
+				}
+				const int32 Deleted = DeleteShotCameraTwins(Target->Shot.Get(), C->Camera, TConstArrayView<FGuid>(&Twin, 1));
+				AfterChange(true);
+				UE_LOG(LogBlackEyeCustom, Display, TEXT("[BlackEyeCustom] delete bake %s: %d bake camera(s) deleted"), *GetNameSafe(Target->Shot.Get()), Deleted);
 				return FReply::Handled();
 			};
 			auto Button = [](const FName& Icon, const FText& Label, const FText& Tip, TFunction<FReply()> OnClick, TAttribute<bool> Enabled)
@@ -1051,12 +1378,20 @@ namespace BlackEyeFastBake
 							[SetLock]() { return SetLock(true); },
 							TAttribute<bool>::CreateLambda([Target]() { return Target->TwinGuid().IsValid(); }))
 					]
-					+ SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 12, 0)
+					+ SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 6, 0)
 					[
 						Button("Icons.Unlock", LOCTEXT("UnlockNow", "Unlock"),
 							LOCTEXT("UnlockNowTip", "The camera cut plays the live Black Eye camera again (here, or in the whole shot)."),
 							[SetLock]() { return SetLock(false); },
 							TAttribute<bool>::CreateLambda([Target]() { return Target->Current() && Target->Current()->Twins.Num() > 0; }))
+					]
+					+ SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 12, 0)
+					[
+						Button("Icons.Delete", LOCTEXT("DeleteNow", "Delete"),
+							LOCTEXT("DeleteNowTip", "Unlocks, then deletes the bake camera picked above from the shot (all of it, in every edit "
+							                        "that uses the shot). Asks first; Edit > Undo brings it back."),
+							DeleteTwin,
+							TAttribute<bool>::CreateLambda([Target]() { return Target->TwinGuid().IsValid(); }))
 					]
 					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
 					[
@@ -1085,6 +1420,136 @@ namespace BlackEyeFastBake
 			];
 		}
 
+		/** The shot list's state: its rows, rebuilt when the scope choice changes. */
+		struct FRowsUI
+		{
+			TArray<FBakeRow> Rows;
+			bool bOnlySelected = true; // "Only what's selected": lock / unlock act on the frames the sections show
+			TSharedPtr<SVerticalBox> List;
+			TFunction<void()> Rebuild;
+		};
+
+		/**
+		 * The window's shot list, for a scope of more than one shot (an edit, its selected sections, several sequences):
+		 * every shot camera with what it plays now, lock / unlock / delete on each, and on all at once. Hidden when the
+		 * one-shot controls (MakeShotBox) cover the scope.
+		 */
+		TSharedRef<SWidget> MakeShotsBox(const TSharedRef<FBakeScope>& Scope, const TSharedRef<FRowsUI> UI)
+		{
+			auto SpansApply = [Scope, UI]() { return UI->bOnlySelected && Scope->bSelectedOnly && !Scope->bWholeShots && !Scope->IsMany(); };
+			auto Run = [Scope, UI, SpansApply](int32 Index, ERowsAction Action)
+			{
+				if (Index != INDEX_NONE && !UI->Rows.IsValidIndex(Index))
+				{
+					return FReply::Handled();
+				}
+				const TArrayView<FBakeRow> Rows = Index == INDEX_NONE ? TArrayView<FBakeRow>(UI->Rows) : TArrayView<FBakeRow>(&UI->Rows[Index], 1);
+				RunRowsAction(Rows, Action, SpansApply(), Index == INDEX_NONE ? Scope->Describe() : UI->Rows[Index].Label());
+				++Scope->Generation;
+				return FReply::Handled();
+			};
+			auto IconButton = [Run, UI](int32 Index, const FName& Icon, const FText& Tip, ERowsAction Action)
+			{
+				return SNew(SButton)
+					.ButtonStyle(FAppStyle::Get(), "SimpleButton")
+					.ToolTipText(Tip)
+					.IsEnabled_Lambda([UI, Index]() { return UI->Rows.IsValidIndex(Index) && UI->Rows[Index].NumTwins > 0; })
+					.OnClicked_Lambda([Run, Index, Action]() { return Run(Index, Action); })
+					[ SNew(SImage).Image(FAppStyle::GetBrush(Icon)).ColorAndOpacity(FSlateColor::UseForeground()) ];
+			};
+			auto AllButton = [Run, UI](const FName& Icon, const FText& Label, const FText& Tip, ERowsAction Action)
+			{
+				return SNew(SButton)
+					.ToolTipText(Tip)
+					.IsEnabled_Lambda([UI]() { return UI->Rows.ContainsByPredicate([](const FBakeRow& R) { return R.NumTwins > 0; }); })
+					.OnClicked_Lambda([Run, Action]() { return Run(INDEX_NONE, Action); })
+					[
+						SNew(SHorizontalBox)
+						+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0, 0, 4, 0)[ SNew(SImage).Image(FAppStyle::GetBrush(Icon)) ]
+						+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)[ SNew(STextBlock).Text(Label) ]
+					];
+			};
+
+			UI->List = SNew(SVerticalBox);
+			UI->Rebuild = [Scope, UI, SpansApply, IconButton]()
+			{
+				UI->Rows = Scope->Rows();
+				UI->List->ClearChildren();
+				for (int32 i = 0; i < UI->Rows.Num(); ++i)
+				{
+					UI->Rows[i].Refresh(SpansApply());
+					UI->List->AddSlot().AutoHeight().Padding(0, 1)
+					[
+						SNew(SHorizontalBox)
+						+ SHorizontalBox::Slot().FillWidth(0.5f).VAlign(VAlign_Center)[ SNew(STextBlock).Text(FText::FromString(UI->Rows[i].Label())) ]
+						+ SHorizontalBox::Slot().FillWidth(0.5f).VAlign(VAlign_Center)
+						[
+							SNew(STextBlock).ColorAndOpacity(FSlateColor::UseSubduedForeground())
+							.Text_Lambda([UI, i]() { return UI->Rows.IsValidIndex(i) ? FText::FromString(UI->Rows[i].Status) : FText(); })
+						]
+						+ SHorizontalBox::Slot().AutoWidth()
+						[ IconButton(i, "Icons.Lock", LOCTEXT("RowLockTip", "Lock: this shot's camera cut plays its bake."), ERowsAction::Lock) ]
+						+ SHorizontalBox::Slot().AutoWidth()
+						[ IconButton(i, "Icons.Unlock", LOCTEXT("RowUnlockTip", "Unlock: this shot's camera cut plays the live Black Eye camera."), ERowsAction::Unlock) ]
+						+ SHorizontalBox::Slot().AutoWidth()
+						[ IconButton(i, "Icons.Delete", LOCTEXT("RowDeleteTip", "Delete this shot's current bake camera (unlocks first; asks)."), ERowsAction::Delete) ]
+					];
+				}
+				if (UI->Rows.Num() == 0)
+				{
+					UI->List->AddSlot().AutoHeight()[ SNew(STextBlock).Text(LOCTEXT("NoRows", "No shot here plays a Black Eye camera.")) ];
+				}
+			};
+			UI->Rebuild();
+
+			return SNew(SBorder).BorderImage(FAppStyle::GetBrush("ToolPanel.DarkGroupBorder")).Padding(8)
+			.Visibility_Lambda([Scope]() { return Scope->TargetBakes() ? EVisibility::Collapsed : EVisibility::Visible; })
+			[
+				SNew(SVerticalBox)
+				+ SVerticalBox::Slot().AutoHeight()
+				[
+					SNew(SHorizontalBox)
+					+ SHorizontalBox::Slot().FillWidth(1.f).VAlign(VAlign_Center)
+					[
+						SNew(STextBlock).Font(FAppStyle::GetFontStyle("BoldFont"))
+						.Text_Lambda([UI]() { return FText::Format(LOCTEXT("ShotsHeading", "Shots ({0})"), UI->Rows.Num()); })
+					]
+					+ SHorizontalBox::Slot().AutoWidth().Padding(4, 0, 0, 0)
+					[ AllButton("Icons.Lock", LOCTEXT("LockAllRows", "Lock all"),
+						LOCTEXT("LockAllRowsTip", "Every shot's camera cut plays its bake. Shots without one are skipped."), ERowsAction::Lock) ]
+					+ SHorizontalBox::Slot().AutoWidth().Padding(4, 0, 0, 0)
+					[ AllButton("Icons.Unlock", LOCTEXT("UnlockAllRows", "Unlock all"),
+						LOCTEXT("UnlockAllRowsTip", "Every shot's camera cut plays the live Black Eye camera."), ERowsAction::Unlock) ]
+					+ SHorizontalBox::Slot().AutoWidth().Padding(4, 0, 0, 0)
+					[ AllButton("Icons.Delete", LOCTEXT("DeleteAllRows", "Delete all"),
+						LOCTEXT("DeleteAllRowsTip", "Unlocks, then deletes every bake camera of these shots. Asks first; Edit > Undo brings them back."),
+						ERowsAction::DeleteAll) ]
+				]
+				+ SVerticalBox::Slot().AutoHeight().Padding(0, 4, 0, 0)
+				[
+					SNew(SCheckBox)
+					.Visibility_Lambda([Scope]() { return Scope->bSelectedOnly && !Scope->bWholeShots && !Scope->IsMany() ? EVisibility::Visible : EVisibility::Collapsed; })
+					.IsChecked_Lambda([UI]() { return UI->bOnlySelected ? ECheckBoxState::Checked : ECheckBoxState::Unchecked; })
+					.OnCheckStateChanged_Lambda([UI, SpansApply](ECheckBoxState S)
+					{
+						UI->bOnlySelected = S == ECheckBoxState::Checked;
+						for (FBakeRow& Row : UI->Rows)
+						{
+							Row.Refresh(SpansApply());
+						}
+					})
+					.ToolTipText(LOCTEXT("OnlySelectedTip", "On: lock and unlock change only the frames the selected sections show (each shot's camera "
+					                                        "cut is split there). Off: whole shots. Delete always removes the whole bake."))
+					[ SNew(STextBlock).Text(LOCTEXT("OnlySelected", "Only what's selected")) ]
+				]
+				+ SVerticalBox::Slot().AutoHeight().Padding(0, 4, 0, 0)
+				[
+					SNew(SBox).MaxDesiredHeight(220.f)
+					[ SNew(SScrollBox) + SScrollBox::Slot()[ UI->List.ToSharedRef() ] ]
+				]
+			];
+		}
+
 		/** The dialog: how to bake, the twin, lock, and what that would bake. Starts the batch on Bake. */
 		void OpenDialog(const FBakeScope& InScope, TFunction<void(FEditBakeSettings&)> Adjust = nullptr)
 		{
@@ -1104,16 +1569,18 @@ namespace BlackEyeFastBake
 			bool bBake = false;
 
 			// The summary follows the settings; the plan is re-made only when what it depends on changes.
-			struct FPlanCache { int32 Handles = INDEX_NONE; int32 Mode = INDEX_NONE; bool bSelectedOnly = false; int32 Camera = INDEX_NONE; int32 Twin = INDEX_NONE;
-			                    TArray<FBlackEyeShotBakePlan> Plans; };
+			struct FPlanCache { int32 Handles = INDEX_NONE; int32 Mode = INDEX_NONE; bool bSelectedOnly = false; bool bWholeShots = false; int32 Camera = INDEX_NONE;
+			                    int32 Twin = INDEX_NONE; int32 Generation = INDEX_NONE; TArray<FBlackEyeShotBakePlan> Plans; };
 			TSharedRef<FPlanCache> Cache = MakeShared<FPlanCache>();
 			auto CurrentPlans = [Scope, Settings, Cache]() -> const TArray<FBlackEyeShotBakePlan>&
 			{
 				const int32 Camera = Scope->Target ? Scope->Target->Camera : INDEX_NONE;
 				const int32 Twin = Scope->Target ? Scope->Target->Twin : INDEX_NONE;
 				if (Cache->Handles != Settings->HandleFrames || Cache->Mode != Settings->Mode || Cache->bSelectedOnly != Scope->bSelectedOnly
-					|| Cache->Camera != Camera || Cache->Twin != Twin)
+					|| Cache->bWholeShots != Scope->bWholeShots || Cache->Camera != Camera || Cache->Twin != Twin || Cache->Generation != Scope->Generation)
 				{
+					Cache->bWholeShots = Scope->bWholeShots;
+					Cache->Generation = Scope->Generation;
 					Cache->Handles = Settings->HandleFrames;
 					Cache->Mode = Settings->Mode;
 					Cache->bSelectedOnly = Scope->bSelectedOnly;
@@ -1198,13 +1665,26 @@ namespace BlackEyeFastBake
 				return Choice([Value, bOption]() { return *Value == bOption; }, [Value, bOption]() { *Value = bOption; }, Label, Explain, Indent, Enabled);
 			};
 
-			// Whole edit or selection: shown only when something is selected.
-			auto ScopeChoice = [Scope](bool bSelected, const FText& Label)
+			// Selected sections, their whole shots, or the whole edit: shown only when something is selected.
+			const TSharedRef<FRowsUI> RowsUI = MakeShared<FRowsUI>();
+			auto ScopeChoice = [Scope, RowsUI](bool bSelected, bool bWhole, const FText& Label, const FText& Tip)
 			{
 				return SNew(SCheckBox)
 					.Style(FAppStyle::Get(), "RadioButton")
-					.IsChecked_Lambda([Scope, bSelected]() { return Scope->bSelectedOnly == bSelected ? ECheckBoxState::Checked : ECheckBoxState::Unchecked; })
-					.OnCheckStateChanged_Lambda([Scope, bSelected](ECheckBoxState) { Scope->bSelectedOnly = bSelected; })
+					.ToolTipText(Tip)
+					.IsChecked_Lambda([Scope, bSelected, bWhole]()
+					{
+						return Scope->bSelectedOnly == bSelected && (!bSelected || Scope->bWholeShots == bWhole) ? ECheckBoxState::Checked : ECheckBoxState::Unchecked;
+					})
+					.OnCheckStateChanged_Lambda([Scope, RowsUI, bSelected, bWhole](ECheckBoxState)
+					{
+						Scope->bSelectedOnly = bSelected;
+						Scope->bWholeShots = bSelected && bWhole;
+						if (RowsUI->Rebuild)
+						{
+							RowsUI->Rebuild();
+						}
+					})
 					[ SNew(STextBlock).Text(Label) ];
 			};
 			const EVisibility ScopeVisibility = Scope->Selected.Num() ? EVisibility::Visible : EVisibility::Collapsed;
@@ -1244,13 +1724,22 @@ namespace BlackEyeFastBake
 							[
 								SNew(SHorizontalBox).Visibility(ScopeVisibility)
 								+ SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 16, 0)
-								[ ScopeChoice(true, FText::Format(LOCTEXT("ScopeSelected", "Selected sections ({0})"), Scope->Selected.Num())) ]
+								[ ScopeChoice(true, false, FText::Format(LOCTEXT("ScopeSelected", "Selected sections ({0})"), Scope->Selected.Num()),
+									LOCTEXT("ScopeSelectedTip", "Only the frames the selected sections show (plus handles).")) ]
+								+ SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 16, 0)
+								[ ScopeChoice(true, true, LOCTEXT("ScopeWholeShots", "Their whole shots"),
+									LOCTEXT("ScopeWholeShotsTip", "Each selected section's shot at full length, as if you opened the shot on its own and "
+									                              "baked it there. Still baked from here; nothing is reopened.")) ]
 								+ SHorizontalBox::Slot().AutoWidth()
-								[ ScopeChoice(false, LOCTEXT("ScopeWhole", "Whole edit")) ]
+								[ ScopeChoice(false, false, LOCTEXT("ScopeWhole", "Whole edit"), LOCTEXT("ScopeWholeTip", "Every shot where the edit shows it.")) ]
 							]
 							+ SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 8)
 							[
 								MakeShotBox(Scope)
+							]
+							+ SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 8)
+							[
+								MakeShotsBox(Scope, RowsUI)
 							]
 
 							// 1. How to bake
@@ -1418,15 +1907,15 @@ namespace BlackEyeFastBake
 		}
 
 		/**
-		 * `BlackEyeCustom.FastBake.BakeEdit [handles] [warmup] [keep 0|1] [lock 0|1|2] [selected 0|1] [mode 0|1|2] [direct 0|1]
+		 * `BlackEyeCustom.FastBake.BakeEdit [handles] [warmup] [keep 0|1] [lock 0|1|2] [selected 0|1|2] [mode 0|1|2] [direct 0|1]
 		 * [setup 0|1]`: the dialog's Bake, without the dialog, on the open Sequencer's focused sequence. lock: 0 none, 1 all,
 		 * 2 only the baked frames. mode: 0 from the master like a render, 1 from the master with handles, 2 shot by shot.
-		 * direct: twins written as data. setup: re-copy an existing twin's camera setup. Omitted arguments use the dialog's
+		 * selected: 2 bakes the selected sections' whole shots. direct: twins written as data. setup: re-copy an existing twin's camera setup. Omitted arguments use the dialog's
 		 * last values; `selected` defaults to 1 when shot sections are selected, as the dialog does.
-		 * `BlackEyeCustom.FastBake.EditPlan [handles] [selected 0|1] [mode 0|1|2]` only logs what it would bake.
+		 * `BlackEyeCustom.FastBake.EditPlan [handles] [selected 0|1|2] [mode 0|1|2]` only logs what it would bake.
 		 */
 		FAutoConsoleCommand GBakeEditCommand(TEXT("BlackEyeCustom.FastBake.BakeEdit"),
-			TEXT("Bake every Black Eye camera the focused edit (or its selected sections) shows, keyed only where shown. Args: [handles] [warmup] [keep 0|1] [lock 0|1|2] [selected 0|1] [mode 0|1|2] [direct 0|1] [setup 0|1]."),
+			TEXT("Bake every Black Eye camera the focused edit (or its selected sections) shows, keyed only where shown. Args: [handles] [warmup] [keep 0|1] [lock 0|1|2] [selected 0|1|2] [mode 0|1|2] [direct 0|1] [setup 0|1]."),
 			FConsoleCommandWithArgsDelegate::CreateStatic([](const TArray<FString>& Args)
 			{
 				TOptional<FBakeScope> Scope = OpenSequencerScope();
@@ -1441,7 +1930,7 @@ namespace BlackEyeFastBake
 				if (Args.IsValidIndex(1)) { Settings.WarmUpFrames = FCString::Atoi(*Args[1]); }
 				if (Args.IsValidIndex(2)) { Settings.bKeepOtherKeys = FCString::Atoi(*Args[2]) != 0; }
 				if (Args.IsValidIndex(3)) { Settings.Lock = FMath::Clamp(FCString::Atoi(*Args[3]), 0, 2); }
-				if (Args.IsValidIndex(4)) { Scope->bSelectedOnly = FCString::Atoi(*Args[4]) != 0 && Scope->Selected.Num() > 0; }
+				if (Args.IsValidIndex(4)) { Scope->bSelectedOnly = FCString::Atoi(*Args[4]) != 0 && Scope->Selected.Num() > 0; Scope->bWholeShots = FCString::Atoi(*Args[4]) == 2; }
 				if (Args.IsValidIndex(5)) { Settings.Mode = FMath::Clamp(FCString::Atoi(*Args[5]), 0, 2); }
 				if (Args.IsValidIndex(6)) { Settings.bWriteDirect = FCString::Atoi(*Args[6]) != 0; }
 				if (Args.IsValidIndex(7)) { Settings.bRefreshSetup = FCString::Atoi(*Args[7]) != 0; }
@@ -1449,7 +1938,7 @@ namespace BlackEyeFastBake
 			}));
 
 		FAutoConsoleCommand GEditPlanCommand(TEXT("BlackEyeCustom.FastBake.EditPlan"),
-			TEXT("Log what Bake Edit would bake for the focused sequence (or its selected sections). Args: [handles] [selected 0|1] [mode 0|1|2]."),
+			TEXT("Log what Bake Edit would bake for the focused sequence (or its selected sections). Args: [handles] [selected 0|1|2] [mode 0|1|2]."),
 			FConsoleCommandWithArgsDelegate::CreateStatic([](const TArray<FString>& Args)
 			{
 				TOptional<FBakeScope> Scope = OpenSequencerScope();
@@ -1461,7 +1950,7 @@ namespace BlackEyeFastBake
 				FEditBakeSettings Settings;
 				Settings.Load();
 				if (Args.IsValidIndex(0)) { Settings.HandleFrames = FCString::Atoi(*Args[0]); }
-				if (Args.IsValidIndex(1)) { Scope->bSelectedOnly = FCString::Atoi(*Args[1]) != 0 && Scope->Selected.Num() > 0; }
+				if (Args.IsValidIndex(1)) { Scope->bSelectedOnly = FCString::Atoi(*Args[1]) != 0 && Scope->Selected.Num() > 0; Scope->bWholeShots = FCString::Atoi(*Args[1]) == 2; }
 				if (Args.IsValidIndex(2)) { Settings.Mode = FMath::Clamp(FCString::Atoi(*Args[2]), 0, 2); }
 				const TArray<FBlackEyeShotBakePlan> Plans = Scope->Plan(Settings);
 				UE_LOG(LogBlackEyeCustom, Display, TEXT("[BlackEyeCustom] edit plan %s, handles %d, mode %d: %d camera(s)"), *Scope->Describe(),
@@ -1549,6 +2038,37 @@ namespace BlackEyeFastBake
 							OpenDialog(Scope);
 						});
 					})));
+
+				// Lock, unlock or delete the bakes of every shot these sequences show, without the window (same actions as its
+				// shot list).
+				auto RowsEntry = [&Section, &Assets](FName Name, const FText& Label, const FText& Tip, const FName& Icon, ERowsAction Action)
+				{
+					Section.AddMenuEntry(Name, Label, Tip, FSlateIcon(FAppStyle::GetAppStyleSetName(), Icon),
+						FUIAction(FExecuteAction::CreateLambda([Assets, Action]()
+						{
+							RunNextTick([Assets, Action]()
+							{
+								FBakeScope Scope;
+								for (const FSoftObjectPath& Asset : Assets)
+								{
+									if (ULevelSequence* Sequence = Cast<ULevelSequence>(Asset.TryLoad()))
+									{
+										Scope.Many.Add(Sequence);
+									}
+								}
+								Scope.Edit = Scope.Many.Num() ? Scope.Many[0] : nullptr;
+								TArray<FBakeRow> Rows = Scope.Rows();
+								RunRowsAction(Rows, Action, false, Scope.IsMany() ? Scope.Describe() : GetNameSafe(Scope.Edit.Get()));
+							});
+						})));
+				};
+				RowsEntry(TEXT("BlackEyeLockBakes"), LOCTEXT("LockBakesAsset", "Black Eye: Lock Bakes"),
+					LOCTEXT("LockBakesAssetTip", "Every shot these sequences show plays its bake (shots without one are skipped)."), "Icons.Lock", ERowsAction::Lock);
+				RowsEntry(TEXT("BlackEyeUnlockBakes"), LOCTEXT("UnlockBakesAsset", "Black Eye: Unlock Bakes"),
+					LOCTEXT("UnlockBakesAssetTip", "Every shot these sequences show plays the live Black Eye camera."), "Icons.Unlock", ERowsAction::Unlock);
+				RowsEntry(TEXT("BlackEyeDeleteBakes"), LOCTEXT("DeleteBakesAsset", "Black Eye: Delete Bakes..."),
+					LOCTEXT("DeleteBakesAssetTip", "Unlocks, then deletes every bake camera of the shots these sequences show. Asks first."),
+					"Icons.Delete", ERowsAction::DeleteAll);
 			}));
 		}
 	}

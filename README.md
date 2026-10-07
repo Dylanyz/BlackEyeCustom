@@ -49,15 +49,23 @@ Three places give the whole picture:
     there; the rest stays live Black Eye), or the live camera.
   - **This shot** (when one shot section is selected, or a shot is open with nothing selected): pick its Black Eye
     camera (the one on the camera cut by default) and its bake camera, or **Create new +** for another one beside it;
-    **Lock** / **Unlock** act at once, for just the selected section or the whole shot.
+    **Lock** / **Unlock** / **Delete** act at once, for just the selected section or the whole shot (Delete always
+    removes the whole bake camera, after asking).
+  - **Shots** (an edit, several selected sections, several sequences): every shot camera with what it plays now,
+    Lock / Unlock / Delete per shot and **Lock all / Unlock all / Delete all**. With sections selected, **Only what's
+    selected** limits lock and unlock to the frames they show.
+  - **Selected sections / Their whole shots / Whole edit:** *Their whole shots* bakes each selected section's shot at
+    full length, as if it were open on its own, still from the master.
 
-  Console: `BlackEyeCustom.FastBake.BakeEdit [handles] [warmup] [keep 0|1] [lock 0|1|2] [selected 0|1] [mode 0|1|2]
-  [direct 0|1] [setup 0|1]`, `BlackEyeCustom.FastBake.EditPlan [handles] [selected 0|1] [mode 0|1|2]`.
+  Content Browser, on one or several sequences: **Black Eye: Lock Bakes**, **Unlock Bakes**, **Delete Bakes...**.
+
+  Console: `BlackEyeCustom.FastBake.BakeEdit [handles] [warmup] [keep 0|1] [lock 0|1|2] [selected 0|1|2] [mode 0|1|2]
+  [direct 0|1] [setup 0|1]` (selected 2: the whole shots), `BlackEyeCustom.FastBake.EditPlan [handles] [selected 0|1|2] [mode 0|1|2]`.
 - **From Python:** `unreal.BlackEyeFastBakeLibrary.bake_shot(sequence, options)` (options: `camera_binding_name`,
   `start_frame`, `end_frame`, `ranges`, `warm_up_frames`, `settle_each_range`, `keep_other_keys`, `sub_steps`,
   `lock_after_bake`, `lock_baked_frames_only`),
   `get_edit_bake_plan(edit, handle_frames)` or `get_sections_bake_plan(sections, handle_frames)` (each entry's `ranges` go straight into `options.ranges`),
-  `set_locked(sequence, name, bool)`, `get_bake_info(sequence)`.
+  `set_locked(sequence, name, bool)`, `delete_bakes(sequence, name)`, `get_bake_info(sequence)`.
 - A frame range bakes only that range; outside it, and between baked ranges, the twin interpolates between the
   nearest keys. Bake the whole shot (the
   default) before relying on a lock everywhere. Starting mid-shot, give `warm_up_frames` (a few seconds) so the damping

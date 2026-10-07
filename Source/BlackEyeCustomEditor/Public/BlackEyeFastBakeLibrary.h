@@ -220,6 +220,13 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Black Eye|Fast Bake")
 	static int32 SetLocked(ULevelSequence* Sequence, const FString& CameraBindingName, bool bLocked);
 
+	/**
+	 * Deletes a Black Eye camera's bake cameras (twins), after pointing the camera cuts that play them back at the
+	 * live camera. Empty CameraBindingName: every baked camera in the sequence. One undo step. Returns how many.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Black Eye|Fast Bake")
+	static int32 DeleteBakes(ULevelSequence* Sequence, const FString& CameraBindingName);
+
 	/** Every baked Black Eye camera in the sequence: its twin, whether it's locked, and how it was baked. */
 	UFUNCTION(BlueprintCallable, Category = "Black Eye|Fast Bake")
 	static TArray<FBlackEyeBakeInfo> GetBakeInfo(ULevelSequence* Sequence);

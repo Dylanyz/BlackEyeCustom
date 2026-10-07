@@ -20,6 +20,7 @@
 #include "MovieScene.h"
 #include "MovieSceneBindingReferences.h"
 #include "MovieSceneCommonHelpers.h"
+#include "MovieSceneFolder.h"
 #include "MovieSceneObjectBindingID.h"
 #include "MovieScenePossessable.h"
 #include "MovieSceneSpawnable.h"
@@ -998,6 +999,154 @@ int32 BlackEyeFastBake::SetShotCameraLock(ULevelSequence* Shot, const FGuid& Cam
 	return Changed;
 }
 
+namespace BlackEyeFastBake
+{
+	extern TArray<TWeakPtr<ISequencer>> OpenSequencers; // BlackEyeFastBakeMenu.cpp
+
+	/** Every tag naming this binding loses it, as Sequencer's Delete does (ObjectBindingModel.cpp:1143-1148). */
+	void UntagEverywhere(UMovieScene& MovieScene, const FGuid& Binding)
+	{
+		const UE::MovieScene::FFixedObjectBindingID ID(Binding, MovieSceneSequenceID::Root);
+		TArray<FName> Tags;
+		for (const TPair<FName, FMovieSceneObjectBindingIDs>& Tag : MovieScene.AllTaggedBindings())
+		{
+			if (Tag.Value.IDs.Contains(FMovieSceneObjectBindingID(ID)))
+			{
+				Tags.Add(Tag.Key);
+			}
+		}
+		for (const FName& Tag : Tags)
+		{
+			MovieScene.UntagBinding(Tag, ID);
+		}
+	}
+
+	void RemoveFromFolders(TArrayView<UMovieSceneFolder* const> Folders, const FGuid& Binding)
+	{
+		for (UMovieSceneFolder* Folder : Folders)
+		{
+			if (Folder)
+			{
+				if (Folder->GetChildObjectBindings().Contains(Binding))
+				{
+					Folder->RemoveChildObjectBinding(Binding);
+				}
+				RemoveFromFolders(Folder->GetChildFolders(), Binding);
+			}
+		}
+	}
+
+	/** The twin's spawned copies in every open Sequencer showing the shot, as root or under an edit. */
+	void DestroySpawnedTwinEverywhere(const ULevelSequence* Shot, const FGuid& Twin)
+	{
+		OpenSequencers.RemoveAll([](const TWeakPtr<ISequencer>& S) { return !S.IsValid(); });
+		for (const TWeakPtr<ISequencer>& Weak : OpenSequencers)
+		{
+			if (const TSharedPtr<ISequencer> Sequencer = Weak.Pin())
+			{
+				DestroySpawnedTwin(*Sequencer, Shot, Twin);
+			}
+		}
+	}
+
+	/**
+	 * One binding deleted the way Sequencer's own Delete does it: untagged, its child bindings (the twin's camera
+	 * component) deleted with their tracks, out of folders, the binding removed, its spawned copies destroyed
+	 * (ObjectBindingModel.cpp:1135-1167, SpawnableModel.cpp:102-116, PossessableModel.cpp:217-248).
+	 */
+	void DeleteBinding(ULevelSequence& Shot, UMovieScene& MovieScene, const FGuid& Binding)
+	{
+		UntagEverywhere(MovieScene, Binding);
+		TArray<FGuid> Children;
+		for (int32 i = 0; i < MovieScene.GetPossessableCount(); ++i)
+		{
+			if (MovieScene.GetPossessable(i).GetParent() == Binding)
+			{
+				Children.Add(MovieScene.GetPossessable(i).GetGuid());
+			}
+		}
+		for (const FGuid& Child : Children)
+		{
+			DeleteBinding(Shot, MovieScene, Child);
+		}
+		RemoveFromFolders(MovieScene.GetRootFolders(), Binding);
+		if (MovieScene.FindSpawnable(Binding))
+		{
+			if (MovieScene.RemoveSpawnable(Binding))
+			{
+				DestroySpawnedTwinEverywhere(&Shot, Binding);
+			}
+		}
+		else if (MovieScene.RemovePossessable(Binding))
+		{
+			DestroySpawnedTwinEverywhere(&Shot, Binding); // a custom spawnable binding; a plain possessable spawns nothing
+			Shot.UnbindPossessableObjects(Binding);
+		}
+	}
+}
+
+int32 BlackEyeFastBake::DeleteShotCameraTwins(ULevelSequence* Shot, const FGuid& Camera, TConstArrayView<FGuid> Twins)
+{
+	UMovieScene* MovieScene = Shot ? Shot->GetMovieScene() : nullptr;
+	if (!MovieScene)
+	{
+		return 0;
+	}
+	const FTwin Found = TwinsOf(*MovieScene, Camera);
+	TArray<FGuid> Doomed;
+	for (const FGuid& Twin : Twins.Num() ? Twins : TConstArrayView<FGuid>(Found.Alive))
+	{
+		if (Found.Alive.Contains(Twin))
+		{
+			Doomed.Add(Twin);
+		}
+	}
+	const bool bAll = Twins.Num() == 0;
+	if (Doomed.Num() == 0 && !(bAll && Found.Stale.Num()))
+	{
+		return 0;
+	}
+	const FScopedTransaction Transaction(LOCTEXT("DeleteBake", "Delete Black Eye bake"));
+	Shot->Modify();
+	MovieScene->Modify();
+	// Unlock first: every cut on a deleted twin (and, deleting them all, on a dead one) plays the camera again.
+	TArray<FGuid> From = Doomed;
+	if (bAll)
+	{
+		From.Append(Found.Stale);
+	}
+	RebindCuts(*MovieScene, From, Camera);
+	for (const FGuid& Twin : Doomed)
+	{
+		DeleteBinding(*Shot, *MovieScene, Twin);
+	}
+	if (bAll)
+	{
+		MovieScene->RemoveTag(TwinTag(Camera)); // the dead IDs too
+	}
+	Shot->MarkPackageDirty();
+	return Doomed.Num();
+}
+
+int32 BlackEyeFastBake::DeleteBakes(ULevelSequence* Sequence, const FString& CameraBindingName)
+{
+	UMovieScene* MovieScene = Sequence ? Sequence->GetMovieScene() : nullptr;
+	if (!MovieScene)
+	{
+		return 0;
+	}
+	const FScopedTransaction Transaction(LOCTEXT("DeleteBakes", "Delete Black Eye bakes"));
+	int32 Deleted = 0;
+	for (const FTwin& Found : FindTwins(*MovieScene))
+	{
+		if (CameraBindingName.IsEmpty() || BindingName(*MovieScene, Found.Camera) == CameraBindingName)
+		{
+			Deleted += DeleteShotCameraTwins(Sequence, Found.Camera, {});
+		}
+	}
+	return Deleted;
+}
+
 FString BlackEyeFastBake::DescribeCutPlay(const UMovieScene& MovieScene, const FGuid& Camera, const TRange<FFrameNumber>& Span)
 {
 	const FTwin Twins = TwinsOf(MovieScene, Camera);
@@ -1114,6 +1263,11 @@ FBlackEyeFastBakeReport UBlackEyeFastBakeLibrary::BakeShot(ULevelSequence* Seque
 int32 UBlackEyeFastBakeLibrary::SetLocked(ULevelSequence* Sequence, const FString& CameraBindingName, bool bLocked)
 {
 	return BlackEyeFastBake::SetLocked(Sequence, CameraBindingName, bLocked);
+}
+
+int32 UBlackEyeFastBakeLibrary::DeleteBakes(ULevelSequence* Sequence, const FString& CameraBindingName)
+{
+	return BlackEyeFastBake::DeleteBakes(Sequence, CameraBindingName);
 }
 
 TArray<FBlackEyeBakeInfo> UBlackEyeFastBakeLibrary::GetBakeInfo(ULevelSequence* Sequence)

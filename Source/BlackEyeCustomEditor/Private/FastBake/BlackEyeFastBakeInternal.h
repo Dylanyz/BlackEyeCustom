@@ -43,6 +43,16 @@ namespace BlackEyeFastBake
 	 */
 	int32 SetShotCameraLock(ULevelSequence* Shot, const FGuid& Camera, const FGuid& Twin, bool bLock, const TRange<FFrameNumber>& Span);
 
+	/**
+	 * Deletes bake cameras of one Black Eye camera the way Sequencer's own Delete does (untag, child bindings, folders,
+	 * spawned copies); camera cuts on them play the camera again first. Twins empty: all of them, dead tag IDs too.
+	 * One undo step. Returns the bake cameras deleted (BlackEyeFastBakeTwin.cpp).
+	 */
+	int32 DeleteShotCameraTwins(ULevelSequence* Shot, const FGuid& Camera, TConstArrayView<FGuid> Twins);
+
+	/** Every bake camera of the named Black Eye camera (empty: of all of them) deleted. Returns how many. */
+	int32 DeleteBakes(ULevelSequence* Sequence, const FString& CameraBindingName);
+
 	/** What a shot's cuts for one camera play within Span: "live Black Eye", a twin's name, or "mixed". */
 	FString DescribeCutPlay(const UMovieScene& MovieScene, const FGuid& Camera, const TRange<FFrameNumber>& Span);
 
