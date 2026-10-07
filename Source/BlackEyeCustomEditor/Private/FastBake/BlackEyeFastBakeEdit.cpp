@@ -20,6 +20,7 @@
 #include "MovieScene.h"
 #include "MovieSceneCommonHelpers.h"
 #include "Sections/MovieSceneCameraCutSection.h"
+#include "ScopedTransaction.h"
 #include "Sections/MovieSceneSubSection.h"
 #include "SequencerToolMenuContext.h"
 #include "Styling/AppStyle.h"
@@ -47,27 +48,57 @@ namespace BlackEyeFastBake
 	/** What the dialog asks, remembered per user between sessions. */
 	struct FEditBakeSettings
 	{
-		int32 HandleFrames = 24;
-		int32 WarmUpFrames = 60;
+		enum EMode : int32 { MasterLikeRender = 0, MasterHandles = 1, ShotByShot = 2 };
+		enum ELock : int32 { NoLock = 0, LockAll = 1, LockBaked = 2 };
+
+		int32 Mode = MasterLikeRender;
+		int32 HandleFrames = 24;   // each side; Like a render: after each cut only
+		int32 WarmUpFrames = 60;   // not with Like a render, which settles at each cut instead
+		bool bWriteDirect = true;  // twin written as data; false: through Sequencer, inside each shot
+		bool bRefreshSetup = false;
 		bool bKeepOtherKeys = true;
-		bool bLock = true;
+		int32 Lock = LockAll;
 
 		static constexpr const TCHAR* Section = TEXT("BlackEyeCustom.FastBake.Edit");
 
+		bool FromMaster() const { return Mode != ShotByShot; }
+		bool SettleAtCut() const { return Mode == MasterLikeRender; }
+
 		void Load()
 		{
+			GConfig->GetInt(Section, TEXT("Mode"), Mode, GEditorPerProjectIni);
 			GConfig->GetInt(Section, TEXT("HandleFrames"), HandleFrames, GEditorPerProjectIni);
 			GConfig->GetInt(Section, TEXT("WarmUpFrames"), WarmUpFrames, GEditorPerProjectIni);
+			GConfig->GetBool(Section, TEXT("bWriteDirect"), bWriteDirect, GEditorPerProjectIni);
+			GConfig->GetBool(Section, TEXT("bRefreshSetup"), bRefreshSetup, GEditorPerProjectIni);
 			GConfig->GetBool(Section, TEXT("bKeepOtherKeys"), bKeepOtherKeys, GEditorPerProjectIni);
-			GConfig->GetBool(Section, TEXT("bLock"), bLock, GEditorPerProjectIni);
+			GConfig->GetInt(Section, TEXT("Lock"), Lock, GEditorPerProjectIni);
+			Mode = FMath::Clamp(Mode, 0, 2);
+			Lock = FMath::Clamp(Lock, 0, 2);
 		}
 
 		void Save() const
 		{
+			GConfig->SetInt(Section, TEXT("Mode"), Mode, GEditorPerProjectIni);
 			GConfig->SetInt(Section, TEXT("HandleFrames"), HandleFrames, GEditorPerProjectIni);
 			GConfig->SetInt(Section, TEXT("WarmUpFrames"), WarmUpFrames, GEditorPerProjectIni);
+			GConfig->SetBool(Section, TEXT("bWriteDirect"), bWriteDirect, GEditorPerProjectIni);
+			GConfig->SetBool(Section, TEXT("bRefreshSetup"), bRefreshSetup, GEditorPerProjectIni);
 			GConfig->SetBool(Section, TEXT("bKeepOtherKeys"), bKeepOtherKeys, GEditorPerProjectIni);
-			GConfig->SetBool(Section, TEXT("bLock"), bLock, GEditorPerProjectIni);
+			GConfig->SetInt(Section, TEXT("Lock"), Lock, GEditorPerProjectIni);
+		}
+
+		/** The bake options every camera of the batch shares; name and ranges come from each plan. */
+		FBlackEyeFastBakeOptions Options() const
+		{
+			FBlackEyeFastBakeOptions Options;
+			Options.WarmUpFrames = SettleAtCut() ? 0 : WarmUpFrames;
+			Options.bSettleEachRange = SettleAtCut();
+			Options.bKeepOtherKeys = bKeepOtherKeys;
+			Options.bLockAfterBake = Lock != NoLock;
+			Options.bLockBakedFramesOnly = Lock == LockBaked;
+			Options.bRefreshTwinSetup = bRefreshSetup;
+			return Options;
 		}
 	};
 
@@ -134,6 +165,7 @@ namespace BlackEyeFastBake
 			FGuid Camera;
 			TRange<FFrameNumber> Ticks;
 			TRange<FFrameNumber> CutTicks;
+			TWeakObjectPtr<UMovieSceneSubSection> Section; // the section showing the shot
 		};
 
 		/**
@@ -181,7 +213,7 @@ namespace BlackEyeFastBake
 						const TRange<FFrameNumber> Ticks = TRange<FFrameNumber>::Intersection(InnerWindow, Cut.Range);
 						if (!Ticks.IsEmpty())
 						{
-							Out.Add({ Inner, Cut.Camera, Ticks, Cut.Range });
+							Out.Add({ Inner, Cut.Camera, Ticks, Cut.Range, const_cast<UMovieSceneSubSection*>(Sub) });
 						}
 					}
 					if (Cameras.Num() == 0 && Depth < 8 && !Path.Contains(Inner))
@@ -197,6 +229,12 @@ namespace BlackEyeFastBake
 
 	TArray<FBlackEyeShotBakePlan> GetEditBakePlan(ULevelSequence* EditSequence, int32 HandleFrames, TConstArrayView<const UMovieSceneSubSection*> Only)
 	{
+		return GetEditBakePlan(EditSequence, HandleFrames, HandleFrames, false, Only);
+	}
+
+	TArray<FBlackEyeShotBakePlan> GetEditBakePlan(ULevelSequence* EditSequence, int32 HeadFrames, int32 TailFrames, bool bSettleAtCut,
+	                                              TConstArrayView<const UMovieSceneSubSection*> Only)
+	{
 		using namespace Edit;
 		TArray<FBlackEyeShotBakePlan> Plans;
 		if (!EditSequence)
@@ -208,41 +246,76 @@ namespace BlackEyeFastBake
 		// A whole edit is seen within its playback range; a section picked by hand is baked whole, even past it.
 		Collect(EditSequence, Only.Num() ? TRange<FFrameNumber>::All() : EditSequence->GetMovieScene()->GetPlaybackRange(), 0, Path, Uses, Only);
 
+		// Per plan: the shot frames each use shows, and how far handles may reach (its camera cut: outside it that
+		// camera isn't the one shown).
+		struct FSpan { int32 Start; int32 End; int32 Min; int32 Max; };
+		TArray<TArray<FSpan>> Spans;
 		for (const FUse& Use : Uses)
 		{
 			ULevelSequence* Shot = Use.Shot.Get();
 			const UMovieScene* MovieScene = Shot->GetMovieScene();
 			const FString Name = MovieScene->GetObjectDisplayName(Use.Camera).ToString();
-			FBlackEyeShotBakePlan* Plan = Plans.FindByPredicate([&](const FBlackEyeShotBakePlan& P) { return P.Shot == Shot && P.CameraBindingName == Name; });
-			if (!Plan)
+			int32 Index = Plans.IndexOfByPredicate([&](const FBlackEyeShotBakePlan& P) { return P.Shot == Shot && P.CameraBindingName == Name; });
+			if (Index == INDEX_NONE)
 			{
-				Plan = &Plans.AddDefaulted_GetRef();
-				Plan->Shot = Shot;
-				Plan->CameraBindingName = Name;
+				Index = Plans.Num();
+				FBlackEyeShotBakePlan& Plan = Plans.AddDefaulted_GetRef();
+				Plan.Shot = Shot;
+				Plan.CameraBindingName = Name;
+				Plan.FirstSection = Use.Section;
+				Spans.AddDefaulted();
 			}
-			++Plan->NumUses;
+			++Plans[Index].NumUses;
 
 			auto ToDisplay = [MovieScene](FFrameNumber Tick, bool bCeil)
 			{
 				const FFrameTime T = FFrameRate::TransformTime(FFrameTime(Tick), MovieScene->GetTickResolution(), MovieScene->GetDisplayRate());
 				return bCeil ? T.CeilToFrame().Value : T.FloorToFrame().Value;
 			};
-			// Handles widen the range, but never past the camera cut: outside it the camera isn't the one shown.
-			int32 Start = ToDisplay(Use.Ticks.GetLowerBoundValue(), false) - FMath::Max(0, HandleFrames);
-			int32 End = ToDisplay(Use.Ticks.GetUpperBoundValue(), true) + FMath::Max(0, HandleFrames);
-			if (Use.CutTicks.HasLowerBound())
-			{
-				Start = FMath::Max(Start, ToDisplay(Use.CutTicks.GetLowerBoundValue(), false));
-			}
-			if (Use.CutTicks.HasUpperBound())
-			{
-				End = FMath::Min(End, ToDisplay(Use.CutTicks.GetUpperBoundValue(), true));
-			}
-			Plan->Ranges.Add({ Start, End });
+			Spans[Index].Add({ ToDisplay(Use.Ticks.GetLowerBoundValue(), false), ToDisplay(Use.Ticks.GetUpperBoundValue(), true),
+				Use.CutTicks.HasLowerBound() ? ToDisplay(Use.CutTicks.GetLowerBoundValue(), false) : TNumericLimits<int32>::Lowest(),
+				Use.CutTicks.HasUpperBound() ? ToDisplay(Use.CutTicks.GetUpperBoundValue(), true) : TNumericLimits<int32>::Max() });
 		}
-		for (FBlackEyeShotBakePlan& Plan : Plans)
+
+		for (int32 p = 0; p < Plans.Num(); ++p)
 		{
-			Plan.Ranges = NormalizeRanges(MoveTemp(Plan.Ranges));
+			TArray<FSpan>& Shown = Spans[p];
+			TArray<FBlackEyeBakeRange>& Ranges = Plans[p].Ranges;
+			if (!bSettleAtCut)
+			{
+				for (const FSpan& S : Shown)
+				{
+					Ranges.Add({ FMath::Max(S.Start - FMath::Max(0, HeadFrames), S.Min), FMath::Min(S.End + FMath::Max(0, TailFrames), S.Max) });
+				}
+				Ranges = NormalizeRanges(MoveTemp(Ranges));
+				continue;
+			}
+			// Like a render: every span starts on its cut, where it will open with a snap. Spans showing the same frames
+			// merge; tail handles never run into the next span's start, which must stay a cut of its own.
+			Shown.Sort([](const FSpan& A, const FSpan& B) { return A.Start < B.Start; });
+			TArray<FSpan> Merged;
+			for (const FSpan& S : Shown)
+			{
+				if (Merged.Num() && S.Start < Merged.Last().End)
+				{
+					Merged.Last().End = FMath::Max(Merged.Last().End, S.End);
+					Merged.Last().Max = FMath::Max(Merged.Last().Max, S.Max);
+				}
+				else
+				{
+					Merged.Add(S);
+				}
+			}
+			for (int32 i = 0; i < Merged.Num(); ++i)
+			{
+				int32 End = FMath::Min(Merged[i].End + FMath::Max(0, TailFrames), Merged[i].Max);
+				if (Merged.IsValidIndex(i + 1))
+				{
+					End = FMath::Min(End, Merged[i + 1].Start);
+				}
+				Ranges.Add({ Merged[i].Start, FMath::Max(End, Merged[i].End) });
+			}
+			Ranges = NormalizeRanges(MoveTemp(Ranges), false);
 		}
 		return Plans;
 	}
@@ -286,7 +359,12 @@ namespace BlackEyeFastBake
 			TWeakObjectPtr<ULevelSequence> ReturnTo;                // the Sequencer's root when started, reopened at the end
 			bool bSelectedOnly = false;
 
-			TArray<FBlackEyeShotBakePlan> Plan(int32 HandleFrames) const
+			TArray<FBlackEyeShotBakePlan> Plan(const FEditBakeSettings& Settings) const
+			{
+				return Plan(Settings.SettleAtCut() ? 0 : Settings.HandleFrames, Settings.HandleFrames, Settings.SettleAtCut());
+			}
+
+			TArray<FBlackEyeShotBakePlan> Plan(int32 HeadFrames, int32 TailFrames, bool bSettleAtCut) const
 			{
 				TArray<const UMovieSceneSubSection*> Only;
 				for (const TWeakObjectPtr<UMovieSceneSubSection>& Section : Selected)
@@ -300,7 +378,7 @@ namespace BlackEyeFastBake
 				{
 					return {}; // every selected section is gone
 				}
-				return GetEditBakePlan(Edit.Get(), HandleFrames, Only);
+				return GetEditBakePlan(Edit.Get(), HeadFrames, TailFrames, bSettleAtCut, Only);
 			}
 
 			FString Describe() const
@@ -339,13 +417,24 @@ namespace BlackEyeFastBake
 			return Scope;
 		}
 
-		/** A batch in flight: one shot camera at a time, each opened alone first (BakeShot needs it as root). */
+		FText Summary(const FString& Scope, const TCHAR* How, int32 Baked, int32 Total, int32 Keyed, double Seconds, bool bCancelled,
+		              const TArray<FString>& Failures)
+		{
+			return FText::Format(
+				LOCTEXT("EditDone", "Bake Edit ({1}), {0}: {2} of {3} camera(s) baked, {4} frames keyed, {5}s{6}{7}"),
+				FText::FromString(Scope), FText::FromString(How), Baked, Total, Keyed, FText::AsNumber(FMath::RoundToInt(Seconds)),
+				bCancelled ? LOCTEXT("Cancelled", ". Cancelled") : FText(),
+				Failures.Num() ? FText::FromString(TEXT(". Failed: ") + FString::Join(Failures, TEXT("; "))) : FText());
+		}
+
+		/** A batch in flight, shot by shot: one shot camera at a time, each opened alone first (BakeShot needs it as root). */
 		struct FBatch
 		{
 			FBakeScope Scope;
 			TOptional<FQualifiedFrameTime> EditTime; // the root's playhead, put back at the end
 			TArray<FBlackEyeShotBakePlan> Plans;
 			FEditBakeSettings Settings;
+			ACineCameraActor* Scratch = nullptr;     // the direct writer's, made on first use
 			int32 Next = 0;
 			int32 Baked = 0;
 			int32 KeyedFrames = 0;
@@ -356,22 +445,20 @@ namespace BlackEyeFastBake
 
 		void Finish(const TSharedRef<FBatch>& Batch)
 		{
-			const FText Summary = FText::Format(
-				LOCTEXT("EditDone", "Bake Edit, {0}: {1} of {2} camera(s) baked, {3} frames keyed, {4}s{5}{6}"),
-				FText::FromString(Batch->Scope.Describe()),
-				Batch->Baked, Batch->Plans.Num(), Batch->KeyedFrames, FText::AsNumber(FMath::RoundToInt(Batch->Seconds)),
-				Batch->bCancelled ? LOCTEXT("Cancelled", ". Cancelled") : FText(),
-				Batch->Failures.Num() ? FText::FromString(TEXT(". Failed: ") + FString::Join(Batch->Failures, TEXT("; "))) : FText());
-			UE_LOG(LogBlackEyeCustom, Display, TEXT("[BlackEyeCustom] %s"), *Summary.ToString());
+			DestroyScratchCamera(Batch->Scratch);
+			Batch->Scratch = nullptr;
+			const FText Text = Summary(Batch->Scope.Describe(), TEXT("shot by shot"), Batch->Baked, Batch->Plans.Num(), Batch->KeyedFrames,
+				Batch->Seconds, Batch->bCancelled, Batch->Failures);
+			UE_LOG(LogBlackEyeCustom, Display, TEXT("[BlackEyeCustom] %s"), *Text.ToString());
 			const bool bOk = Batch->Failures.Num() == 0 && !Batch->bCancelled;
 			ULevelSequence* ReturnTo = Batch->Scope.ReturnTo.Get();
 			if (!ReturnTo)
 			{
-				Notify(Summary, bOk);
+				Notify(Text, bOk);
 				return;
 			}
 			// Back to where the user was, at the frame they left.
-			OpenThen(ReturnTo, [Batch, Summary, bOk]()
+			OpenThen(ReturnTo, [Batch, Text, bOk]()
 			{
 				if (TSharedPtr<ISequencer> Sequencer = FindRootSequencer(Batch->Scope.ReturnTo.Get()))
 				{
@@ -381,8 +468,33 @@ namespace BlackEyeFastBake
 					}
 					Sequencer->ForceEvaluate();
 				}
-				Notify(Summary, bOk);
+				Notify(Text, bOk);
 			});
+		}
+
+		/** One shot camera, with the twin written as data instead of through its spawned copy (WriteTwinDirect). */
+		FBlackEyeFastBakeReport BakeShotDirect(FBatch& Batch, ULevelSequence* Shot, const FBlackEyeFastBakeOptions& Options)
+		{
+			FBakeOutput Bake;
+			FBlackEyeFastBakeReport Report = RunBake(Shot, Options, Bake);
+			if (!Report.bSuccess)
+			{
+				return Report;
+			}
+			if (!Batch.Scratch)
+			{
+				Batch.Scratch = SpawnScratchCamera();
+			}
+			{
+				const FScopedTransaction Transaction(LOCTEXT("FastBakeDirect", "Black Eye Fast Bake"));
+				Report.bSuccess = WriteTwinDirect(Shot, Options, Bake, Batch.Scratch, Bake.Sequencer.Get(), Report);
+			}
+			if (Bake.Sequencer)
+			{
+				Bake.Sequencer->NotifyMovieSceneDataChanged(EMovieSceneDataChangeType::MovieSceneStructureItemsChanged);
+				Bake.Sequencer->ForceEvaluate();
+			}
+			return Report;
 		}
 
 		void BakeNext(const TSharedRef<FBatch>& Batch)
@@ -403,14 +515,13 @@ namespace BlackEyeFastBake
 			OpenThen(Shot, [Batch, Index]()
 			{
 				const FBlackEyeShotBakePlan& Plan = Batch->Plans[Index];
-				FBlackEyeFastBakeOptions Options;
+				FBlackEyeFastBakeOptions Options = Batch->Settings.Options();
 				Options.CameraBindingName = Plan.CameraBindingName;
 				Options.Ranges = Plan.Ranges;
-				Options.WarmUpFrames = Batch->Settings.WarmUpFrames;
-				Options.bKeepOtherKeys = Batch->Settings.bKeepOtherKeys;
-				Options.bLockAfterBake = Batch->Settings.bLock;
 				Options.ProgressNote = FString::Printf(TEXT(" (%d of %d)"), Index + 1, Batch->Plans.Num());
-				const FBlackEyeFastBakeReport Report = UBlackEyeFastBakeLibrary::BakeShot(Plan.Shot, Options);
+				const FBlackEyeFastBakeReport Report = Batch->Settings.bWriteDirect
+					? BakeShotDirect(*Batch, Plan.Shot, Options)
+					: UBlackEyeFastBakeLibrary::BakeShot(Plan.Shot, Options);
 				Batch->Seconds += Report.TotalSeconds;
 				if (Report.bSuccess)
 				{
@@ -429,8 +540,67 @@ namespace BlackEyeFastBake
 			});
 		}
 
+		/** The open Sequencer showing this edit: focused on it, else holding it as root. */
+		TSharedPtr<ISequencer> SequencerShowing(ULevelSequence* Edit)
+		{
+			OpenSequencers.RemoveAll([](const TWeakPtr<ISequencer>& S) { return !S.IsValid(); });
+			for (const TWeakPtr<ISequencer>& Weak : OpenSequencers)
+			{
+				const TSharedPtr<ISequencer> Sequencer = Weak.Pin();
+				if (Sequencer && Sequencer->GetFocusedMovieSceneSequence() == Edit)
+				{
+					return Sequencer;
+				}
+			}
+			return FindRootSequencer(Edit);
+		}
+
+		/**
+		 * From the master: the edit stays open and every shot is baked inside it (BlackEyeFastBakeMaster.cpp). Only an edit
+		 * that isn't open yet (the Content Browser entry) is opened, once.
+		 */
+		void StartMaster(const FBakeScope& Scope, const FEditBakeSettings& Settings, bool bOpened = false)
+		{
+			ULevelSequence* EditSequence = Scope.Edit.Get();
+			const TSharedPtr<ISequencer> Sequencer = SequencerShowing(EditSequence);
+			if (!Sequencer)
+			{
+				if (bOpened || !EditSequence)
+				{
+					Notify(FText::Format(LOCTEXT("MasterNotOpen", "{0}: could not open it in Sequencer"), FText::FromString(Scope.Describe())), false);
+					return;
+				}
+				OpenThen(EditSequence, [Scope, Settings]() { StartMaster(Scope, Settings, true); });
+				return;
+			}
+			TArray<FBlackEyeShotBakePlan> Plans = Scope.Plan(Settings);
+			if (Plans.Num() == 0)
+			{
+				Notify(FText::Format(LOCTEXT("NothingToBake", "{0}: no shot with a Black Eye camera on its camera cuts"),
+				                     FText::FromString(Scope.Describe())), false);
+				return;
+			}
+			FMasterBakeSettings Master;
+			Master.bWriteDirect = Settings.bWriteDirect;
+			Master.Options = Settings.Options();
+			const int32 Total = Plans.Num();
+			const FString Describe = Scope.Describe();
+			const TCHAR* How = Settings.SettleAtCut() ? TEXT("from the master, like a render") : TEXT("from the master, with handles");
+			RunMasterBake(Sequencer.ToSharedRef(), MoveTemp(Plans), Master, [Describe, How, Total](const FMasterBakeResult& Result)
+			{
+				const FText Text = Summary(Describe, How, Result.Baked, Total, Result.KeyedFrames, Result.Seconds, Result.bCancelled, Result.Failures);
+				UE_LOG(LogBlackEyeCustom, Display, TEXT("[BlackEyeCustom] %s"), *Text.ToString());
+				Notify(Text, Result.Failures.Num() == 0 && !Result.bCancelled);
+			});
+		}
+
 		void StartBatch(const FBakeScope& Scope, const FEditBakeSettings& Settings)
 		{
+			if (Settings.FromMaster())
+			{
+				RunNextTick([Scope, Settings]() { StartMaster(Scope, Settings); });
+				return;
+			}
 			TSharedRef<FBatch> Batch = MakeShared<FBatch>();
 			Batch->Scope = Scope;
 			if (!Batch->Scope.ReturnTo.IsValid())
@@ -438,7 +608,7 @@ namespace BlackEyeFastBake
 				Batch->Scope.ReturnTo = Scope.Edit;
 			}
 			Batch->Settings = Settings;
-			Batch->Plans = Scope.Plan(Settings.HandleFrames);
+			Batch->Plans = Scope.Plan(Settings);
 			if (TSharedPtr<ISequencer> Sequencer = FindRootSequencer(Batch->Scope.ReturnTo.Get()))
 			{
 				Batch->EditTime = Sequencer->GetGlobalTime();
@@ -452,7 +622,7 @@ namespace BlackEyeFastBake
 			RunNextTick([Batch]() { BakeNext(Batch); });
 		}
 
-		/** The dialog: handles, warm-up, keep, lock, and what that would bake. Starts the batch on Bake. */
+		/** The dialog: how to bake, the twin, lock, and what that would bake. Starts the batch on Bake. */
 		void OpenDialog(const FBakeScope& InScope)
 		{
 			ULevelSequence* EditSequence = InScope.Edit.Get();
@@ -465,20 +635,21 @@ namespace BlackEyeFastBake
 			TSharedRef<FBakeScope> Scope = MakeShared<FBakeScope>(InScope);
 			bool bBake = false;
 
-			// The summary follows the settings; the plan is re-made only when handles or scope change.
-			struct FPlanCache { int32 Handles = INDEX_NONE; bool bSelectedOnly = false; TArray<FBlackEyeShotBakePlan> Plans; };
+			// The summary follows the settings; the plan is re-made only when what it depends on changes.
+			struct FPlanCache { int32 Handles = INDEX_NONE; int32 Mode = INDEX_NONE; bool bSelectedOnly = false; TArray<FBlackEyeShotBakePlan> Plans; };
 			TSharedRef<FPlanCache> Cache = MakeShared<FPlanCache>();
 			auto CurrentPlans = [Scope, Settings, Cache]() -> const TArray<FBlackEyeShotBakePlan>&
 			{
-				if (Cache->Handles != Settings->HandleFrames || Cache->bSelectedOnly != Scope->bSelectedOnly)
+				if (Cache->Handles != Settings->HandleFrames || Cache->Mode != Settings->Mode || Cache->bSelectedOnly != Scope->bSelectedOnly)
 				{
 					Cache->Handles = Settings->HandleFrames;
+					Cache->Mode = Settings->Mode;
 					Cache->bSelectedOnly = Scope->bSelectedOnly;
-					Cache->Plans = Scope->Plan(Settings->HandleFrames);
+					Cache->Plans = Scope->Plan(*Settings);
 				}
 				return Cache->Plans;
 			};
-			auto Summary = [CurrentPlans]()
+			auto PlanSummary = [CurrentPlans]()
 			{
 				const TArray<FBlackEyeShotBakePlan>& Plans = CurrentPlans();
 				if (Plans.Num() == 0)
@@ -505,30 +676,55 @@ namespace BlackEyeFastBake
 					*Lines, Plans.Num(), Shots.Num(), Keyed, Whole ? 100.0 * Keyed / Whole : 0.0, Whole));
 			};
 
-			auto Spin = [](int32* Value, const FText& Tip)
+			auto Spin = [](int32* Value, const FText& Tip, TAttribute<bool> Enabled)
 			{
 				return SNew(SSpinBox<int32>)
 					.MinValue(0).MaxValue(100000).MinSliderValue(0).MaxSliderValue(240)
+					.IsEnabled(Enabled)
 					.Value_Lambda([Value]() { return *Value; })
 					.OnValueChanged_Lambda([Value](int32 V) { *Value = V; })
 					.ToolTipText(Tip);
 			};
-			auto Check = [](bool* Value, const FText& Label, const FText& Tip)
-			{
-				return SNew(SCheckBox)
-					.IsChecked_Lambda([Value]() { return *Value ? ECheckBoxState::Checked : ECheckBoxState::Unchecked; })
-					.OnCheckStateChanged_Lambda([Value](ECheckBoxState S) { *Value = S == ECheckBoxState::Checked; })
-					.ToolTipText(Tip)
-					[ SNew(STextBlock).Text(Label) ];
-			};
-			auto Row = [](const FText& Label, TSharedRef<SWidget> Widget)
+			auto Row = [](TAttribute<FText> Label, TSharedRef<SWidget> Widget)
 			{
 				return SNew(SHorizontalBox)
 					+ SHorizontalBox::Slot().FillWidth(0.45f).VAlign(VAlign_Center)[ SNew(STextBlock).Text(Label) ]
 					+ SHorizontalBox::Slot().FillWidth(0.55f)[ Widget ];
 			};
+			auto Heading = [](const FText& Text)
+			{
+				return SNew(STextBlock).Text(Text).Font(FAppStyle::GetFontStyle("BoldFont"));
+			};
+			// A radio button, its plain-words explanation under it, indented by Indent.
+			auto Choice = [](TFunction<bool()> IsOn, TFunction<void()> TurnOn, const FText& Label, const FText& Explain, float Indent,
+			                 TAttribute<bool> Enabled)
+			{
+				return SNew(SVerticalBox).IsEnabled(Enabled)
+					+ SVerticalBox::Slot().AutoHeight().Padding(Indent, 4, 0, 0)
+					[
+						SNew(SCheckBox)
+						.Style(FAppStyle::Get(), "RadioButton")
+						.IsChecked_Lambda([IsOn]() { return IsOn() ? ECheckBoxState::Checked : ECheckBoxState::Unchecked; })
+						.OnCheckStateChanged_Lambda([TurnOn](ECheckBoxState) { TurnOn(); })
+						[ SNew(STextBlock).Text(Label) ]
+					]
+					+ SVerticalBox::Slot().AutoHeight().Padding(Indent + 22, 0, 0, 2)
+					[
+						SNew(STextBlock).AutoWrapText(true).ColorAndOpacity(FSlateColor::UseSubduedForeground()).Text(Explain)
+					];
+			};
+			auto IntChoice = [Choice](int32* Value, int32 Option, const FText& Label, const FText& Explain, float Indent = 0.f,
+			                          TAttribute<bool> Enabled = true)
+			{
+				return Choice([Value, Option]() { return *Value == Option; }, [Value, Option]() { *Value = Option; }, Label, Explain, Indent, Enabled);
+			};
+			auto BoolChoice = [Choice](bool* Value, bool bOption, const FText& Label, const FText& Explain, float Indent = 0.f,
+			                           TAttribute<bool> Enabled = true)
+			{
+				return Choice([Value, bOption]() { return *Value == bOption; }, [Value, bOption]() { *Value = bOption; }, Label, Explain, Indent, Enabled);
+			};
 
-			// Whole edit or selection: two radio buttons, shown only when something is selected.
+			// Whole edit or selection: shown only when something is selected.
 			auto ScopeChoice = [Scope](bool bSelected, const FText& Label)
 			{
 				return SNew(SCheckBox)
@@ -539,9 +735,18 @@ namespace BlackEyeFastBake
 			};
 			const EVisibility ScopeVisibility = Scope->Selected.Num() ? EVisibility::Visible : EVisibility::Collapsed;
 
+			int32* Mode = &Settings->Mode;
+			const TAttribute<bool> HasHeadHandles = TAttribute<bool>::CreateLambda([Settings]() { return !Settings->SettleAtCut(); });
+			const TAttribute<bool> IsDirect = TAttribute<bool>::CreateLambda([Settings]() { return Settings->bWriteDirect; });
+			const TAttribute<FText> HandlesLabel = TAttribute<FText>::CreateLambda([Settings]()
+			{
+				return Settings->SettleAtCut() ? LOCTEXT("HandlesAfter", "Extra frames after each cut")
+				                               : LOCTEXT("HandlesBoth", "Handles (frames each side)");
+			});
+
 			TSharedRef<SWindow> Window = SNew(SWindow)
 				.Title(FText::Format(LOCTEXT("DialogTitle", "Black Eye Fast Bake: {0}"), FText::FromString(EditSequence->GetName())))
-				.ClientSize(FVector2D(620, 480))
+				.ClientSize(FVector2D(700, 860))
 				.SupportsMinimize(false).SupportsMaximize(false);
 			TWeakPtr<SWindow> WeakWindow = Window;
 
@@ -549,54 +754,134 @@ namespace BlackEyeFastBake
 				SNew(SBorder).BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder")).Padding(12)
 				[
 					SNew(SVerticalBox)
-					+ SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 10)
+					+ SVerticalBox::Slot().FillHeight(1.f)
 					[
-						SNew(STextBlock).AutoWrapText(true)
-						.Text(LOCTEXT("DialogIntro", "Bakes every Black Eye camera the edit (or the selected sections) shows, keyed only on "
-						                             "the frames used plus handles, onto each camera's twin. Each shot is opened on its own "
-						                             "for its bake; you are put back where you were at the end."))
-					]
-					+ SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 8)
-					[
-						SNew(SHorizontalBox).Visibility(ScopeVisibility)
-						+ SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 16, 0)
-						[ ScopeChoice(true, FText::Format(LOCTEXT("ScopeSelected", "Selected sections ({0})"), Scope->Selected.Num())) ]
-						+ SHorizontalBox::Slot().AutoWidth()
-						[ ScopeChoice(false, LOCTEXT("ScopeWhole", "Whole edit")) ]
-					]
-					+ SVerticalBox::Slot().AutoHeight().Padding(0, 2)
-					[
-						Row(LOCTEXT("Handles", "Handles (frames each side)"), Spin(&Settings->HandleFrames,
-							LOCTEXT("HandlesTip", "Keyed frames before and after each section the edit uses, for trimming the edit "
-							                      "later without a re-bake. Never past the shot's camera cut.")))
-					]
-					+ SVerticalBox::Slot().AutoHeight().Padding(0, 2)
-					[
-						Row(LOCTEXT("WarmUp", "Warm-up (frames, not keyed)"), Spin(&Settings->WarmUpFrames,
-							LOCTEXT("WarmUpTip", "Frames played before each range's handle, unkeyed, so the camera arrives moving and "
-							                     "lagging as it does in playback rather than parked on its subject. Ranges closer than "
-							                     "this are baked in one run.")))
-					]
-					+ SVerticalBox::Slot().AutoHeight().Padding(0, 6, 0, 2)
-					[
-						Check(&Settings->bKeepOtherKeys, LOCTEXT("Keep", "Keep each twin's keys outside these ranges"),
-							LOCTEXT("KeepTip", "On: other edits that use the same shots keep their baked frames. "
-							                   "Off: each twin holds only this edit's frames."))
-					]
-					+ SVerticalBox::Slot().AutoHeight().Padding(0, 2)
-					[
-						Check(&Settings->bLock, LOCTEXT("LockAll", "Lock the shots (they play the bake)"),
-							LOCTEXT("LockAllTip", "Point each shot's camera cuts at its twin afterwards."))
-					]
-					+ SVerticalBox::Slot().FillHeight(1.f).Padding(0, 10)
-					[
-						SNew(SBorder).BorderImage(FAppStyle::GetBrush("ToolPanel.DarkGroupBorder")).Padding(8)
+						SNew(SScrollBox)
+						+ SScrollBox::Slot()
 						[
-							SNew(SScrollBox)
-							+ SScrollBox::Slot()[ SNew(STextBlock).Text_Lambda(Summary) ]
+							SNew(SVerticalBox)
+							+ SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 8)
+							[
+								SNew(STextBlock).AutoWrapText(true)
+								.Text(LOCTEXT("DialogIntro", "Records every Black Eye camera this edit shows into a plain \"twin\" camera, "
+								                             "so the edit plays the same way every time."))
+							]
+							+ SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 8)
+							[
+								SNew(SHorizontalBox).Visibility(ScopeVisibility)
+								+ SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 16, 0)
+								[ ScopeChoice(true, FText::Format(LOCTEXT("ScopeSelected", "Selected sections ({0})"), Scope->Selected.Num())) ]
+								+ SHorizontalBox::Slot().AutoWidth()
+								[ ScopeChoice(false, LOCTEXT("ScopeWhole", "Whole edit")) ]
+							]
+
+							// 1. How to bake
+							+ SVerticalBox::Slot().AutoHeight().Padding(0, 6, 0, 0)[ Heading(LOCTEXT("HowHeading", "How to bake")) ]
+							+ SVerticalBox::Slot().AutoHeight()
+							[
+								SNew(STextBlock).AutoWrapText(true).Margin(FMargin(0, 4, 0, 0))
+								.Text(LOCTEXT("MasterExplain", "From the master (new, fast): stays in this edit. For each shot, Sequencer plays just "
+								                               "that shot inside the edit, the camera is stepped frame by frame and recorded. Nothing "
+								                               "is opened or closed, so there's no wait for a big edit to reopen."))
+							]
+							+ SVerticalBox::Slot().AutoHeight()
+							[
+								IntChoice(Mode, FEditBakeSettings::MasterLikeRender, LOCTEXT("LikeRender", "Like a render"),
+									LOCTEXT("LikeRenderExplain", "At every cut the camera starts already settled on its subject, just like a final "
+									                             "render. Only the frames the edit shows are baked, plus extra frames after each cut. "
+									                             "If you later make a shot start earlier, bake again."), 16.f)
+							]
+							+ SVerticalBox::Slot().AutoHeight()
+							[
+								IntChoice(Mode, FEditBakeSettings::MasterHandles, LOCTEXT("WithHandles", "With handles"),
+									LOCTEXT("WithHandlesExplain", "Also bakes frames before each cut, so you can trim the edit later without "
+									                              "baking again. The catch: the camera settles at the start of the handle, so at the "
+									                              "cut it's already moving and lagging, not settled like a render."), 16.f)
+							]
+							+ SVerticalBox::Slot().AutoHeight()
+							[
+								IntChoice(Mode, FEditBakeSettings::ShotByShot, LOCTEXT("ShotByShot", "Shot by shot (the old way)"),
+									LOCTEXT("ShotByShotExplain", "Opens each shot on its own, bakes it, then opens this edit again. Same result "
+									                             "as \"With handles\", but reopening a big edit can freeze the editor for minutes."))
+							]
+							+ SVerticalBox::Slot().AutoHeight().Padding(0, 8, 0, 2)
+							[
+								Row(HandlesLabel, Spin(&Settings->HandleFrames,
+									LOCTEXT("HandlesTip", "Keyed frames beyond what the edit shows, for trimming later without a re-bake. "
+									                      "Never past the shot's camera cut."), true))
+							]
+							+ SVerticalBox::Slot().AutoHeight().Padding(0, 2)
+							[
+								Row(LOCTEXT("WarmUp", "Warm-up (frames, not keyed)"), Spin(&Settings->WarmUpFrames,
+									LOCTEXT("WarmUpTip", "Frames played before each range, unkeyed, so the camera arrives moving as it does in "
+									                     "playback. Not used by \"Like a render\", which settles at the cut instead."), HasHeadHandles))
+							]
+
+							// 2. The twin
+							+ SVerticalBox::Slot().AutoHeight().Padding(0, 14, 0, 0)[ Heading(LOCTEXT("TwinHeading", "The twin")) ]
+							+ SVerticalBox::Slot().AutoHeight()
+							[
+								BoolChoice(&Settings->bWriteDirect, true, LOCTEXT("Direct", "Write it directly (new)"),
+									LOCTEXT("DirectExplain", "Writes the twin straight into each shot's data. No stepping into shots."))
+							]
+							+ SVerticalBox::Slot().AutoHeight()
+							[
+								BoolChoice(&Settings->bWriteDirect, false, LOCTEXT("Inside", "Write it inside each shot (the old way, tested)"),
+									LOCTEXT("InsideExplain", "Sequencer steps into each shot, sets the twin up on a live copy and saves it. "
+									                         "Slower; always copies the camera setup too."))
+							]
+							+ SVerticalBox::Slot().AutoHeight().Padding(0, 6, 0, 0)
+							[
+								BoolChoice(&Settings->bRefreshSetup, false, LOCTEXT("KeysOnly", "Keys only"),
+									LOCTEXT("KeysOnlyExplain", "Only the motion and lens keys change. A twin keeps its camera setup (a new "
+									                           "twin always gets one)."), 16.f, IsDirect)
+							]
+							+ SVerticalBox::Slot().AutoHeight()
+							[
+								BoolChoice(&Settings->bRefreshSetup, true, LOCTEXT("Setup", "Keys and camera setup"),
+									LOCTEXT("SetupExplain", "Also copies the Black Eye camera's lens, filmback and extra components again. "
+									                        "Use it after changing the camera's setup."), 16.f, IsDirect)
+							]
+							+ SVerticalBox::Slot().AutoHeight().Padding(0, 6, 0, 0)
+							[
+								BoolChoice(&Settings->bKeepOtherKeys, true, LOCTEXT("Keep", "Keep other baked frames"),
+									LOCTEXT("KeepExplain", "Frames baked before (for another edit) stay. Only these frames are replaced."))
+							]
+							+ SVerticalBox::Slot().AutoHeight()
+							[
+								BoolChoice(&Settings->bKeepOtherKeys, false, LOCTEXT("Replace", "Replace them all"),
+									LOCTEXT("ReplaceExplain", "The twin keeps only this bake."))
+							]
+
+							// 3. Lock
+							+ SVerticalBox::Slot().AutoHeight().Padding(0, 14, 0, 0)[ Heading(LOCTEXT("LockHeading", "Afterwards, the shots play")) ]
+							+ SVerticalBox::Slot().AutoHeight()
+							[
+								IntChoice(&Settings->Lock, FEditBakeSettings::LockAll, LOCTEXT("LockAll", "The bake, everywhere (lock)"),
+									LOCTEXT("LockAllExplain", "Each shot's camera cut plays its twin."))
+							]
+							+ SVerticalBox::Slot().AutoHeight()
+							[
+								IntChoice(&Settings->Lock, FEditBakeSettings::LockBaked, LOCTEXT("LockBaked", "The bake only where baked"),
+									LOCTEXT("LockBakedExplain", "Only the frames baked now play the twin; the rest of each shot keeps the live "
+									                            "Black Eye camera. The shot's camera cut is split at those frames."))
+							]
+							+ SVerticalBox::Slot().AutoHeight()
+							[
+								IntChoice(&Settings->Lock, FEditBakeSettings::NoLock, LOCTEXT("NoLock", "The live Black Eye camera (don't lock)"),
+									LOCTEXT("NoLockExplain", "The twins are baked but not used until you lock them."))
+							]
+
+							// What it would bake
+							+ SVerticalBox::Slot().AutoHeight().Padding(0, 14, 0, 4)[ Heading(LOCTEXT("PlanHeading", "What gets baked")) ]
+							+ SVerticalBox::Slot().AutoHeight()
+							[
+								SNew(SBorder).BorderImage(FAppStyle::GetBrush("ToolPanel.DarkGroupBorder")).Padding(8)
+								[ SNew(STextBlock).AutoWrapText(true).Text_Lambda(PlanSummary) ]
+							]
 						]
 					]
-					+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Right)
+					+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Right).Padding(0, 10, 0, 0)
 					[
 						SNew(SHorizontalBox)
 						+ SHorizontalBox::Slot().AutoWidth().Padding(4, 0)
@@ -646,13 +931,15 @@ namespace BlackEyeFastBake
 		}
 
 		/**
-		 * `BlackEyeCustom.FastBake.BakeEdit [handles] [warmup] [keep 0|1] [lock 0|1] [selected 0|1]`: the dialog's Bake,
-		 * without the dialog, on the open Sequencer's focused sequence. Omitted arguments use the dialog's last values;
-		 * `selected` defaults to 1 when shot sections are selected, as the dialog does.
-		 * `BlackEyeCustom.FastBake.EditPlan [handles] [selected 0|1]` only logs what it would bake.
+		 * `BlackEyeCustom.FastBake.BakeEdit [handles] [warmup] [keep 0|1] [lock 0|1|2] [selected 0|1] [mode 0|1|2] [direct 0|1]
+		 * [setup 0|1]`: the dialog's Bake, without the dialog, on the open Sequencer's focused sequence. lock: 0 none, 1 all,
+		 * 2 only the baked frames. mode: 0 from the master like a render, 1 from the master with handles, 2 shot by shot.
+		 * direct: twins written as data. setup: re-copy an existing twin's camera setup. Omitted arguments use the dialog's
+		 * last values; `selected` defaults to 1 when shot sections are selected, as the dialog does.
+		 * `BlackEyeCustom.FastBake.EditPlan [handles] [selected 0|1] [mode 0|1|2]` only logs what it would bake.
 		 */
 		FAutoConsoleCommand GBakeEditCommand(TEXT("BlackEyeCustom.FastBake.BakeEdit"),
-			TEXT("Bake every Black Eye camera the focused edit (or its selected sections) shows, keyed only where shown. Args: [handles] [warmup] [keep 0|1] [lock 0|1] [selected 0|1]."),
+			TEXT("Bake every Black Eye camera the focused edit (or its selected sections) shows, keyed only where shown. Args: [handles] [warmup] [keep 0|1] [lock 0|1|2] [selected 0|1] [mode 0|1|2] [direct 0|1] [setup 0|1]."),
 			FConsoleCommandWithArgsDelegate::CreateStatic([](const TArray<FString>& Args)
 			{
 				TOptional<FBakeScope> Scope = OpenSequencerScope();
@@ -666,13 +953,16 @@ namespace BlackEyeFastBake
 				if (Args.IsValidIndex(0)) { Settings.HandleFrames = FCString::Atoi(*Args[0]); }
 				if (Args.IsValidIndex(1)) { Settings.WarmUpFrames = FCString::Atoi(*Args[1]); }
 				if (Args.IsValidIndex(2)) { Settings.bKeepOtherKeys = FCString::Atoi(*Args[2]) != 0; }
-				if (Args.IsValidIndex(3)) { Settings.bLock = FCString::Atoi(*Args[3]) != 0; }
+				if (Args.IsValidIndex(3)) { Settings.Lock = FMath::Clamp(FCString::Atoi(*Args[3]), 0, 2); }
 				if (Args.IsValidIndex(4)) { Scope->bSelectedOnly = FCString::Atoi(*Args[4]) != 0 && Scope->Selected.Num() > 0; }
+				if (Args.IsValidIndex(5)) { Settings.Mode = FMath::Clamp(FCString::Atoi(*Args[5]), 0, 2); }
+				if (Args.IsValidIndex(6)) { Settings.bWriteDirect = FCString::Atoi(*Args[6]) != 0; }
+				if (Args.IsValidIndex(7)) { Settings.bRefreshSetup = FCString::Atoi(*Args[7]) != 0; }
 				StartBatch(*Scope, Settings);
 			}));
 
 		FAutoConsoleCommand GEditPlanCommand(TEXT("BlackEyeCustom.FastBake.EditPlan"),
-			TEXT("Log what Bake Edit would bake for the focused sequence (or its selected sections). Args: [handles] [selected 0|1]."),
+			TEXT("Log what Bake Edit would bake for the focused sequence (or its selected sections). Args: [handles] [selected 0|1] [mode 0|1|2]."),
 			FConsoleCommandWithArgsDelegate::CreateStatic([](const TArray<FString>& Args)
 			{
 				TOptional<FBakeScope> Scope = OpenSequencerScope();
@@ -683,10 +973,12 @@ namespace BlackEyeFastBake
 				}
 				FEditBakeSettings Settings;
 				Settings.Load();
-				const int32 Handles = Args.IsValidIndex(0) ? FCString::Atoi(*Args[0]) : Settings.HandleFrames;
+				if (Args.IsValidIndex(0)) { Settings.HandleFrames = FCString::Atoi(*Args[0]); }
 				if (Args.IsValidIndex(1)) { Scope->bSelectedOnly = FCString::Atoi(*Args[1]) != 0 && Scope->Selected.Num() > 0; }
-				const TArray<FBlackEyeShotBakePlan> Plans = Scope->Plan(Handles);
-				UE_LOG(LogBlackEyeCustom, Display, TEXT("[BlackEyeCustom] edit plan %s, handles %d: %d camera(s)"), *Scope->Describe(), Handles, Plans.Num());
+				if (Args.IsValidIndex(2)) { Settings.Mode = FMath::Clamp(FCString::Atoi(*Args[2]), 0, 2); }
+				const TArray<FBlackEyeShotBakePlan> Plans = Scope->Plan(Settings);
+				UE_LOG(LogBlackEyeCustom, Display, TEXT("[BlackEyeCustom] edit plan %s, handles %d, mode %d: %d camera(s)"), *Scope->Describe(),
+					Settings.HandleFrames, Settings.Mode, Plans.Num());
 				for (const FBlackEyeShotBakePlan& Plan : Plans)
 				{
 					FString Ranges;

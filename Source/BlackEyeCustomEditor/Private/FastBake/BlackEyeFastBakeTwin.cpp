@@ -13,11 +13,21 @@
 #include "Channels/MovieSceneDoubleChannel.h"
 #include "Channels/MovieSceneFloatChannel.h"
 #include "Engine/Engine.h"
+#include "Evaluation/MovieSceneEvaluationTemplateInstance.h"
+#include "Evaluation/MovieSceneSequenceHierarchy.h"
 #include "ISequencer.h"
 #include "LevelSequence.h"
 #include "MovieScene.h"
+#include "MovieSceneBindingReferences.h"
 #include "MovieSceneCommonHelpers.h"
 #include "MovieSceneObjectBindingID.h"
+#include "MovieScenePossessable.h"
+#include "MovieSceneSpawnable.h"
+#include "MovieSceneSpawnRegister.h"
+#include "Sections/MovieSceneBoolSection.h"
+#include "SubObjectLocator.h"
+#include "Tracks/MovieSceneSpawnTrack.h"
+#include "UniversalObjectLocator.h"
 #include "Interfaces/IPluginManager.h"
 #include "Misc/ScopeExit.h"
 #include "ScopedTransaction.h"
@@ -453,6 +463,97 @@ namespace BlackEyeFastBake
 		return Changed;
 	}
 
+	/** How a twin was baked: date, frames, settings, Black Eye version, the components its setup carries. */
+	FString MakeBakeInfo(const FBlackEyeFastBakeOptions& Options, const TArray<FSample>& Samples, const FString& Components)
+	{
+		const TSharedPtr<IPlugin> BE = IPluginManager::Get().FindEnabledPlugin(TEXT("Black_Eye"));
+		FString Frames;
+		const TArray<TPair<int32, int32>> Runs = SampleRuns(Samples);
+		for (int32 i = 0; i < Runs.Num() && i < 8; ++i)
+		{
+			Frames += FString::Printf(TEXT("%s%.0f-%.0f"), i ? TEXT(", ") : TEXT(""), Samples[Runs[i].Key].Frame, Samples[Runs[i].Value].Frame);
+		}
+		if (Runs.Num() > 8)
+		{
+			Frames += FString::Printf(TEXT(" and %d more"), Runs.Num() - 8);
+		}
+		if (Options.bKeepOtherKeys)
+		{
+			Frames += TEXT(" (earlier keys outside kept)");
+		}
+		return FString::Printf(TEXT("baked %s; frames %s; substeps %d; warmup %d%s; black eye %s; components copied: %s"),
+			*FDateTime::Now().ToString(TEXT("%Y-%m-%d %H:%M")), *Frames, FMath::Max(1, Options.SubSteps), FMath::Max(0, Options.WarmUpFrames),
+			Options.bSettleEachRange ? TEXT(", settled at each cut") : TEXT(""), BE.IsValid() ? *BE->GetDescriptor().VersionName : TEXT("?"),
+			*Components);
+	}
+
+	void SetBakeInfo(AActor& Actor, const FString& Info)
+	{
+		Actor.Tags.RemoveAll([](const FName& Tag) { return Tag.ToString().StartsWith(InfoTagPrefix); });
+		Actor.Tags.Add(FName(*(FString(InfoTagPrefix) + Info)));
+	}
+
+	/** The components line of a twin's bake info, kept when a bake leaves its setup alone. */
+	FString InfoComponents(const AActor& Actor)
+	{
+		for (const FName& Tag : Actor.Tags)
+		{
+			const FString Text = Tag.ToString();
+			const int32 At = Text.StartsWith(InfoTagPrefix) ? Text.Find(TEXT("components copied: ")) : INDEX_NONE;
+			if (At != INDEX_NONE)
+			{
+				return Text.Mid(At + 19);
+			}
+		}
+		return TEXT("unknown");
+	}
+
+	/**
+	 * Splits the camera cuts playing Camera at Span's edges and points the pieces inside at Twin, so only the frames
+	 * baked play the bake; the rest keep the live Black Eye camera. Cuts already on the twin are left alone, so spans
+	 * locked by earlier bakes stay locked.
+	 */
+	void LockSpan(UMovieScene& MovieScene, const FGuid& Camera, const FGuid& Twin, const TRange<FFrameNumber>& Span)
+	{
+		UMovieSceneCameraCutTrack* Cuts = Cast<UMovieSceneCameraCutTrack>(MovieScene.GetCameraCutTrack());
+		if (!Cuts)
+		{
+			return;
+		}
+		const FFrameRate Ticks = MovieScene.GetTickResolution();
+		bool bSplit = false;
+		for (UMovieSceneSection* Section : TArray<UMovieSceneSection*>(Cuts->GetAllSections()))
+		{
+			UMovieSceneCameraCutSection* Inside = Cast<UMovieSceneCameraCutSection>(Section);
+			if (!Inside || Inside->GetCameraBindingID().GetGuid() != Camera || !Inside->GetRange().Overlaps(Span))
+			{
+				continue;
+			}
+			// SplitSection keeps the left part in place and returns the right one (MovieSceneSection.cpp, SplitSection).
+			const FFrameNumber From = Span.GetLowerBoundValue();
+			if (!Inside->HasStartFrame() || Inside->GetInclusiveStartFrame() < From)
+			{
+				Inside = Cast<UMovieSceneCameraCutSection>(Inside->SplitSection(FQualifiedFrameTime(FFrameTime(From), Ticks), false));
+				bSplit = true;
+			}
+			const FFrameNumber To = Span.GetUpperBoundValue();
+			if (Inside && (!Inside->HasEndFrame() || Inside->GetExclusiveEndFrame() > To))
+			{
+				Inside->SplitSection(FQualifiedFrameTime(FFrameTime(To), Ticks), false);
+				bSplit = true;
+			}
+			if (Inside)
+			{
+				Inside->Modify();
+				Inside->SetCameraBindingID(UE::MovieScene::FRelativeObjectBindingID(Twin));
+			}
+		}
+		if (bSplit)
+		{
+			Cuts->RearrangeAllSections(); // sorted by time, as Sequencer keeps them
+		}
+	}
+
 	bool IsLocked(const UMovieScene& MovieScene, const FGuid& Twin)
 	{
 		if (const UMovieSceneCameraCutTrack* Cuts = Cast<UMovieSceneCameraCutTrack>(MovieScene.GetCameraCutTrack()))
@@ -529,8 +630,6 @@ bool BlackEyeFastBake::WriteTwin(ULevelSequence* Sequence, const FBlackEyeFastBa
 		return false;
 	}
 	RetagTwin(MovieScene, Bake.CameraBinding, Twin);
-	// A cut left on a stale twin was locked to an older bake: it plays this one now, lock or not.
-	RebindCuts(MovieScene, Stale, Twin);
 	Report.TwinBindingName = BindingName(MovieScene, Twin);
 
 	// The live Black Eye camera, for its settings: the bake left the sequence evaluated, so it is spawned.
@@ -570,27 +669,7 @@ bool BlackEyeFastBake::WriteTwin(ULevelSequence* Sequence, const FBlackEyeFastBa
 	const TArray<FString> Extra = CopyExtraComponents(Setup, Spawned);
 
 	// How it was baked, for GetBakeInfo and the stale check (P2): saved into the template with everything else.
-	const TSharedPtr<IPlugin> BE = IPluginManager::Get().FindEnabledPlugin(TEXT("Black_Eye"));
-	FString Frames;
-	const TArray<TPair<int32, int32>> Runs = SampleRuns(Bake.Samples);
-	for (int32 i = 0; i < Runs.Num() && i < 8; ++i)
-	{
-		Frames += FString::Printf(TEXT("%s%.0f-%.0f"), i ? TEXT(", ") : TEXT(""), Bake.Samples[Runs[i].Key].Frame, Bake.Samples[Runs[i].Value].Frame);
-	}
-	if (Runs.Num() > 8)
-	{
-		Frames += FString::Printf(TEXT(" and %d more"), Runs.Num() - 8);
-	}
-	if (Options.bKeepOtherKeys)
-	{
-		Frames += TEXT(" (earlier keys outside kept)");
-	}
-	const FString Info = FString::Printf(TEXT("baked %s; frames %s; substeps %d; warmup %d; black eye %s; components copied: %s"),
-		*FDateTime::Now().ToString(TEXT("%Y-%m-%d %H:%M")), *Frames,
-		FMath::Max(1, Options.SubSteps), FMath::Max(0, Options.WarmUpFrames), BE.IsValid() ? *BE->GetDescriptor().VersionName : TEXT("?"),
-		Extra.Num() ? *FString::Join(Extra, TEXT(", ")) : TEXT("none"));
-	Spawned->Tags.RemoveAll([](const FName& Tag) { return Tag.ToString().StartsWith(InfoTagPrefix); });
-	Spawned->Tags.Add(FName(*(FString(InfoTagPrefix) + Info)));
+	SetBakeInfo(*Spawned, MakeBakeInfo(Options, Bake.Samples, Extra.Num() ? FString::Join(Extra, TEXT(", ")) : TEXT("none")));
 
 	Sequencer.GetSpawnRegister().SaveDefaultSpawnableState(Twin, Sequencer.GetFocusedTemplateID(), Sequencer.GetSharedPlaybackState());
 
@@ -615,13 +694,212 @@ bool BlackEyeFastBake::WriteTwin(ULevelSequence* Sequence, const FBlackEyeFastBa
 	}
 	WriteLensKeys(MovieScene, CameraComponentBinding, Times, Bake.Samples, Options.bKeepOtherKeys);
 
-	if (Options.bLockAfterBake)
-	{
-		RebindCuts(MovieScene, { Bake.CameraBinding }, Twin);
-	}
+	ApplyLock(MovieScene, Bake.CameraBinding, Twin, Stale, Options, Bake.Samples);
 	Report.bLocked = IsLocked(MovieScene, Twin);
 	Sequencer.NotifyMovieSceneDataChanged(EMovieSceneDataChangeType::MovieSceneStructureItemsChanged);
 	Sequencer.ForceEvaluate();
+	return true;
+}
+
+void BlackEyeFastBake::ApplyLock(UMovieScene& MovieScene, const FGuid& Camera, const FGuid& Twin, TConstArrayView<FGuid> Stale,
+                                 const FBlackEyeFastBakeOptions& Options, const TArray<FSample>& Samples)
+{
+	// A cut left on a stale twin was locked to an older bake: it plays this one now, lock or not.
+	RebindCuts(MovieScene, Stale, Twin);
+	if (!Options.bLockAfterBake)
+	{
+		return;
+	}
+	if (!Options.bLockBakedFramesOnly)
+	{
+		RebindCuts(MovieScene, { Camera }, Twin);
+		return;
+	}
+	const TArray<FFrameNumber> Times = KeyTimes(MovieScene, Samples);
+	const FFrameNumber OneFrame = FFrameRate::TransformTime(FFrameTime(1), MovieScene.GetDisplayRate(), MovieScene.GetTickResolution()).CeilToFrame();
+	for (const TPair<int32, int32>& Run : SampleRuns(Samples))
+	{
+		LockSpan(MovieScene, Camera, Twin, TRange<FFrameNumber>(Times[Run.Key], Times[Run.Value] + OneFrame));
+	}
+}
+
+namespace BlackEyeFastBake
+{
+	/**
+	 * A spawn track that keeps a new twin spawned for the whole shot, as Sequencer's Add > Actor gives a legacy
+	 * spawnable (FLevelSequenceEditorActorSpawner::SetupDefaultsForSpawnable, LevelSequenceEditorActorSpawner.cpp:238-254).
+	 */
+	void AddSpawnTrack(UMovieScene& MovieScene, const FGuid& Twin)
+	{
+		UMovieSceneSpawnTrack* Track = MovieScene.AddTrack<UMovieSceneSpawnTrack>(Twin);
+		UMovieSceneBoolSection* Section = Cast<UMovieSceneBoolSection>(Track->CreateNewSection());
+		Section->GetChannel().SetDefault(true);
+		Section->SetRange(TRange<FFrameNumber>::All());
+		Track->AddSection(*Section);
+		Track->SetObjectId(Twin);
+	}
+
+	/**
+	 * The twin's camera-component binding: the child Sequencer made for it on an earlier bake, or a new one as data,
+	 * located by the component's name under the spawned twin. That is how Sequencer binds a spawned actor's component
+	 * (GetHandleToObject binds it with the actor as context; SubObjectLocator.cpp:14-44).
+	 */
+	FGuid FindOrAddCameraComponentBinding(ULevelSequence& Shot, UMovieScene& MovieScene, const FGuid& Twin, const FString& ComponentName)
+	{
+		for (int32 i = 0; i < MovieScene.GetPossessableCount(); ++i)
+		{
+			const FMovieScenePossessable& Possessable = MovieScene.GetPossessable(i);
+			const UClass* Class = Possessable.GetPossessedObjectClass();
+			if (Possessable.GetParent() == Twin && Class && Class->IsChildOf(UCameraComponent::StaticClass()))
+			{
+				return Possessable.GetGuid();
+			}
+		}
+		// The non-const accessor lives on the base; ULevelSequence only overrides the const one, which hides it.
+		FMovieSceneBindingReferences* References = static_cast<UMovieSceneSequence&>(Shot).GetBindingReferences();
+		if (!References || ComponentName.IsEmpty())
+		{
+			return FGuid();
+		}
+		const FGuid Guid = MovieScene.AddPossessable(ComponentName, UCineCameraComponent::StaticClass());
+		if (FMovieScenePossessable* Possessable = MovieScene.FindPossessable(Guid))
+		{
+			Possessable->SetParent(Twin, &MovieScene);
+		}
+		if (FMovieSceneSpawnable* Spawnable = MovieScene.FindSpawnable(Twin))
+		{
+			Spawnable->AddChildPossessable(Guid); // legacy spawnables list their children (SequencerUtilities.cpp:3757-3761)
+		}
+		FUniversalObjectLocator Locator;
+		Locator.AddFragment<FSubObjectLocator>(ComponentName);
+		References->AddBinding(Guid, MoveTemp(Locator));
+		return Guid;
+	}
+
+	/**
+	 * A spawned twin never re-reads its template, so before its setup changes every spawned copy of it goes: the root,
+	 * and each instance of the shot under a master. Destroying first also keeps the editor spawn register from saving a
+	 * modified spawned copy back over the new template (LevelSequenceEditorSpawnRegister.cpp:116-128). The next
+	 * evaluation spawns it again from the new one.
+	 */
+	void DestroySpawnedTwin(ISequencer& Sequencer, const ULevelSequence* Shot, const FGuid& Twin)
+	{
+		TArray<FMovieSceneSequenceID> IDs;
+		if (Sequencer.GetRootMovieSceneSequence() == Shot)
+		{
+			IDs.Add(MovieSceneSequenceID::Root);
+		}
+		if (const FMovieSceneSequenceHierarchy* Hierarchy = Sequencer.GetEvaluationTemplate().GetHierarchy())
+		{
+			for (const TPair<FMovieSceneSequenceID, FMovieSceneSubSequenceData>& Pair : Hierarchy->AllSubSequenceData())
+			{
+				if (Pair.Value.GetLoadedSequence() == Shot)
+				{
+					IDs.Add(Pair.Key);
+				}
+			}
+		}
+		for (const FMovieSceneSequenceID& ID : IDs)
+		{
+			Sequencer.GetSpawnRegister().DestroySpawnedObject(Twin, ID, Sequencer.GetSharedPlaybackState());
+		}
+	}
+}
+
+bool BlackEyeFastBake::WriteTwinDirect(ULevelSequence* Shot, const FBlackEyeFastBakeOptions& Options, const FBakeOutput& Bake, ACineCameraActor* Scratch,
+                                       ISequencer* Sequencer, FBlackEyeFastBakeReport& Report)
+{
+	if (!Shot || Bake.Samples.Num() == 0)
+	{
+		Report.Message = TEXT("nothing baked to write");
+		return false;
+	}
+	UMovieScene& MovieScene = *Shot->GetMovieScene();
+	// Templates are read through the shot alone, whatever Sequencer has open.
+	const TSharedRef<UE::MovieScene::FSharedPlaybackState> State = MovieSceneHelpers::CreateTransientSharedPlaybackState(GWorld, Shot);
+
+	FGuid Twin;
+	TArray<FGuid> Stale;
+	for (const FTwin& Found : FindTwins(MovieScene))
+	{
+		if (Found.Camera == Bake.CameraBinding)
+		{
+			Twin = Found.Twin;
+			Stale = Found.Stale;
+		}
+	}
+	const bool bNew = !Twin.IsValid();
+	Shot->Modify();
+	MovieScene.Modify();
+
+	if (bNew || Options.bRefreshTwinSetup)
+	{
+		// The setup is what was authored: the camera's spawnable template, or the level actor of a possessable one.
+		const ACineCameraActor* Setup = Cast<ACineCameraActor>(MovieSceneHelpers::GetObjectTemplate(Shot, Bake.CameraBinding, State));
+		if (!Setup)
+		{
+			Setup = Bake.Camera.Get();
+		}
+		if (!Setup || !Scratch)
+		{
+			Report.Message = TEXT("no camera setup to copy onto the twin");
+			return false;
+		}
+		{
+			// The scratch is transient and reused for every twin, so dressing it stays out of the undo buffer. Copying
+			// extra components drops any a previous camera left on it (CopyExtraComponents).
+			TGuardValue<ITransaction*> NoUndo(GUndo, nullptr);
+			UCineCameraComponent* ScratchCam = Scratch->GetCineCameraComponent();
+			CopyCameraSettings(Setup->GetCineCameraComponent(), ScratchCam);
+			ScratchCam->SetRelativeTransform(FTransform::Identity);
+			const TArray<FString> Extra = CopyExtraComponents(Setup, Scratch);
+			SetBakeInfo(*Scratch, MakeBakeInfo(Options, Bake.Samples, Extra.Num() ? FString::Join(Extra, TEXT(", ")) : TEXT("none")));
+		}
+		if (bNew)
+		{
+			// A legacy spawnable, like every twin made so far: Sequencer's Add > Actor makes one too
+			// (MakeNewSpawnable -> UMovieScene::AddSpawnable, SequencerUtilities.cpp:1007).
+			const FString Name = BindingName(MovieScene, Bake.CameraBinding) + TEXT("_Bake");
+			UObject* Template = MovieSceneHelpers::MakeSpawnableTemplateFromInstance(*Scratch, &MovieScene,
+				MakeUniqueObjectName(&MovieScene, ACineCameraActor::StaticClass(), FName(*Name)));
+			Twin = MovieScene.AddSpawnable(Name, *Template);
+			MovieScene.SetObjectDisplayName(Twin, FText::FromString(Name));
+			AddSpawnTrack(MovieScene, Twin);
+		}
+		else
+		{
+			if (Sequencer)
+			{
+				DestroySpawnedTwin(*Sequencer, Shot, Twin);
+			}
+			// Sequencer's Save Default State does this from a spawned copy (LevelSequenceEditorSpawnRegister.cpp:159-196).
+			MovieSceneHelpers::CopyObjectTemplate(Shot, Twin, Scratch, State);
+		}
+	}
+	else if (AActor* Template = Cast<AActor>(MovieSceneHelpers::GetObjectTemplate(Shot, Twin, State)))
+	{
+		// Keys only: the setup stays and the bake info follows the keys. Only tags change, which nothing spawned reads.
+		// Templates aren't made transactional (MakeSpawnableTemplateFromInstance), so the tag edit would escape undo.
+		Template->SetFlags(RF_Transactional);
+		Template->Modify();
+		SetBakeInfo(*Template, MakeBakeInfo(Options, Bake.Samples, InfoComponents(*Template)));
+	}
+	RetagTwin(MovieScene, Bake.CameraBinding, Twin);
+	Report.TwinBindingName = BindingName(MovieScene, Twin);
+
+	const TArray<FFrameNumber> Times = KeyTimes(MovieScene, Bake.Samples);
+	WriteTransformKeys(MovieScene, Twin, Times, Bake.Samples, Options.bKeepOtherKeys);
+	const ACineCameraActor* TwinTemplate = Cast<ACineCameraActor>(MovieSceneHelpers::GetObjectTemplate(Shot, Twin, State));
+	const FGuid CameraComponentBinding = FindOrAddCameraComponentBinding(*Shot, MovieScene, Twin,
+		TwinTemplate && TwinTemplate->GetCineCameraComponent() ? TwinTemplate->GetCineCameraComponent()->GetName() : FString());
+	if (!CameraComponentBinding.IsValid())
+	{
+		Report.Message = TEXT("twin written without lens keys: its camera component could not be bound");
+		return false;
+	}
+	WriteLensKeys(MovieScene, CameraComponentBinding, Times, Bake.Samples, Options.bKeepOtherKeys);
+	ApplyLock(MovieScene, Bake.CameraBinding, Twin, Stale, Options, Bake.Samples);
+	Report.bLocked = IsLocked(MovieScene, Twin);
 	return true;
 }
 

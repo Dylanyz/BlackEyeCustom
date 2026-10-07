@@ -50,6 +50,13 @@ struct FBlackEyeFastBakeOptions
 	int32 WarmUpFrames = 0;
 
 	/**
+	 * Every span of Ranges opens with its own snap and settle, as a render's camera cut does, and none is stepped into
+	 * from the one before, even where they touch. Off, spans closer than WarmUpFrames share one run.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Fast Bake")
+	bool bSettleEachRange = false;
+
+	/**
 	 * BakeShot only: keep the twin's keys outside the frames baked now, so bakes for several edits that use the same
 	 * shot add up. False replaces every key (a full re-bake).
 	 */
@@ -81,6 +88,21 @@ struct FBlackEyeFastBakeOptions
 	/** BakeShot only: point the shot's camera cuts at the baked twin afterwards, so the shot plays the bake. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Fast Bake")
 	bool bLockAfterBake = true;
+
+	/**
+	 * With bLockAfterBake: lock only the frames baked now. The shot's camera cuts are split at each baked span; the
+	 * pieces inside play the twin, the rest keep the live Black Eye camera.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Fast Bake")
+	bool bLockBakedFramesOnly = false;
+
+	/**
+	 * Bake Edit from the master only. False: an existing twin gets new keys and bake info and keeps its camera setup
+	 * (no respawn). True: its setup (lens, filmback, extra components) is copied again from the Black Eye camera. A new
+	 * twin always gets the setup.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Fast Bake")
+	bool bRefreshTwinSetup = false;
 
 	/** Appended to the progress dialog's title (a batch's "shot 2 of 5"). Not reflected. */
 	FString ProgressNote;
@@ -137,6 +159,9 @@ struct FBlackEyeShotBakePlan
 	UPROPERTY(BlueprintReadOnly, Category = "Fast Bake") TArray<FBlackEyeBakeRange> Ranges;
 	/** How many cinematic shot sections of the edit use this camera. */
 	UPROPERTY(BlueprintReadOnly, Category = "Fast Bake") int32 NumUses = 0;
+
+	/** Bake Edit from the master: one section of the edit showing this shot (where the shot is reached from). */
+	TWeakObjectPtr<UMovieSceneSubSection> FirstSection;
 };
 
 /**

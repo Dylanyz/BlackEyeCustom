@@ -15,7 +15,7 @@ reproduced here; the files cited ship with each product's source.
 | [3. The algorithm](#3-the-algorithm) | built |
 | [4. Traps](#4-traps) | 4.11-4.18 measured; 4.1 and 4.4 confirmed; the rest from source and review |
 | [5. Output: the baked twin, lock and unlock](#5-output-the-baked-twin-lock-and-unlock) | built, measured on a production edit |
-| [6. Entry points](#6-entry-points) | library, Sequencer menu and Bake Edit built (Bake Edit measured on the repro 2026-10-07); folder batch is P2 |
+| [6. Entry points](#6-entry-points) | library, Sequencer menu and Bake Edit built (Bake Edit measured on the repro 2026-10-07); Bake Edit from the master built 2026-10-07, not yet run; folder batch is P2 |
 | [7. What becomes trivial inside Black Eye](#7-what-becomes-trivial-inside-black-eye) | planned |
 | [8. Measured numbers](#8-measured-numbers) | measured on the repro and on a production angle (P0); speed audit 2026-10-06 |
 | [9. Decisions and rejected ideas](#9-decisions-and-rejected-ideas) | live |
@@ -253,6 +253,12 @@ again by a binding tag (`BlackEyeFastBake_<BEC guid>`).
   same result, and a locked camera cut keeps pointing at the twin across re-bakes.
 - Made with `FSequencerUtilities::MakeNewSpawnable` (Sequencer's Add > Actor path). Not `CreateCamera`: it also locks
   the viewport and adds a camera cut section (`SequencerUtilities.cpp` `NewCameraAdded`).
+  **Corrected 2026-10-07 (from source):** that makes a *legacy* spawnable (`FMovieSceneSpawnable`, via
+  `UMovieScene::AddSpawnable`, `SequencerUtilities.cpp:1007`, `MovieScene.cpp:293-311`), not a custom binding, so
+  the "Changed from the plan" line above describes what 5.8 *can* do, not what twins are. Only assets older than
+  `LevelSequenceUpgradeDynamicBindings` are upgraded on load (`LevelSequence.cpp:460-462`). The direct writer (§6) makes
+  legacy twins too, so every twin is one kind. Also read then: `MakeNewSpawnable` itself runs `NewCameraAdded` for a
+  camera (`SequencerUtilities.cpp:1055-1058`); whether a twin made by it got a cut wasn't re-checked.
 - Settings: every editable property `UCameraComponent` and `UCineCameraComponent` declare, copied from the BEC's
   **spawnable template** (the authored setup; the spawned instance is transient and carries runtime edits), plus the
   components a user or Blueprint added (DynamicLens). Focus method forced to Manual. Camera component at identity.
@@ -360,6 +366,54 @@ Not built yet: re-sync settings without re-baking (P2); keeping the previous bak
     the bake keyed exactly those frames (120, 0.43 ms/frame). Baking the nested edit on top with keep on replaced only
     45-74 and 195-234 and left the rest; across the seams the per-frame position step stayed within 0.1 cm of its
     neighbours. Not yet checked: the toolbar button and dialog by eye; a production master.
+  - **Measured cost of shot by shot on a production master (2026-10-07, reported by a session profiling that editor):**
+    a three-section bake took 1 s; reopening the master afterwards froze the editor 2-3 min. The freeze is the first
+    editor frame after the open (33M `LoadObject` calls), and grows with the takes nested under the master
+    (sections on deactivated rows count). Any path that reopens the master, or makes a shot the root and comes back,
+    pays it.
+- **Bake Edit from the master** (*built 2026-10-07, not yet run*; `Private/FastBake/BlackEyeFastBakeMaster.cpp`). The
+  dialog's default; shot by shot stays as it was. The edit stays Sequencer's root and nothing is opened.
+  - **Each shot is evaluated alone inside the master** through the root instance's
+    `FSequenceInstance::OverrideRootSequence(ShotID)` (`MovieSceneSequenceInstance.h:329`): the mechanism behind
+    Sequencer's "Evaluate Sub Sequences In Isolation" (`Sequencer.cpp:853-856`). Root time is mapped into the shot through
+    `RootToSequenceTransform`, unclamped by its section (`MovieSceneSequenceUpdaters.cpp:707-733`), so frames outside
+    the section (handles) are reachable. The bake passes master time, the inverse of that transform applied to shot
+    frames, so a shot reached through a time warp or loop (non-linear transform) is refused. Switching unlinks what
+    the master animates itself (`:680-690`); the master's own tracks aren't needed by a shot's bake, as they aren't
+    when the shot is root. The override goes back to what Sequencer expects (root, or the focused ID with isolation on).
+    One override per shot, every camera of it baked under it, nothing written while stepping (trap 4.8).
+  - **Like a render** (`bSettleEachRange`): every span the edit shows opens with the snap and settle at its cut, as a
+    render does at a camera cut (§1: MRG fires `NotifyCameraCut` on every cut), and spans are never stepped into from
+    one another. No head handles; tail handles stop at the next span's start, which must stay a cut of its own; they
+    are free, since continuing past an out point doesn't change the cut. This replaces warm-up. **With handles**: head
+    and tail handles as shot by shot, settled at the head handle, so at the cut the camera is already moving.
+    **Head handles and render-like cuts can't both hold in one bake:** the damping only runs forwards.
+  - **Rejected for handles:** sub-section pre/post-roll. Spawn, transform and skeletal tracks don't evaluate in it by
+    default (`MovieSceneTrack.h:69-70`; only media, caches, data layers opt in) and nothing overrides that at compile
+    time, so it means editing every shot. A second, independent player (as `SequencerTools::ExportAnimSequence` does,
+    `SequencerTools.cpp:401-440`) would spawn a second copy of every camera and mesh beside the master's.
+  - **The twin, written directly** (`WriteTwinDirect`, the default): as data, with no spawned twin and no focus. A
+    transient scratch CineCamera, one per batch, is dressed with the camera's setup and copied into the twin's template
+    with `MovieSceneHelpers::CopyObjectTemplate` (`MovieSceneCommonHelpers.cpp:1124-1151`), the code Sequencer's Save
+    Default State runs from a spawned copy (`LevelSequenceEditorSpawnRegister.cpp:159-196`); copying extra components
+    onto the reused scratch drops the previous camera's. A new twin is `UMovieScene::AddSpawnable` plus the spawn track
+    Add > Actor gives it (`LevelSequenceEditorActorSpawner.cpp:238-254`); its camera-component binding is a possessable
+    child located by the component's name (`FSubObjectLocator`). **Keys only** (default): an existing twin gets keys and
+    bake info (template tags) and keeps its setup, so nothing respawns. **Keys and setup**: every spawned copy of the
+    twin is destroyed *before* the template changes (a spawned twin never re-reads its template, and the editor spawn
+    register saves a modified spawned copy back over the template on destroy, `:116-128`), then re-spawned by the next
+    evaluation. The whole master bake is one transaction, one undo.
+  - **The twin, written inside each shot** (the original `WriteTwin`): Sequencer focuses the shot's section within the
+    edit (`FocusSequenceInstance`, no re-root), the override follows the focus so handle frames resolve, then pops out.
+    Always copies the setup.
+  - **Lock only the baked frames** (`bLockBakedFramesOnly`, any mode): the shot's camera cuts on the Black Eye camera
+    are split at each baked span (`UMovieSceneSection::SplitSection`) and the pieces inside point at the twin; the rest
+    stay live, in every edit using the shot. Pieces locked by earlier bakes stay locked; unlock repoints them all, the
+    split points stay (they change nothing).
+  - Not yet measured: that a master bake matches a shot-by-shot bake on the frames both bake; that direct twins spawn,
+    key and undo like Sequencer-made ones; the first editor frame after a master bake (writing twins changes the shots,
+    which Sequencer recompiles on its next tick, `Sequencer.cpp:1118-1126`; hypothesis: per shot, not the master's
+    minutes).
 - **Content Browser batch over a folder** (P2): right-click shot Level Sequence(s) ▸ Bake Black Eye cameras, whole
   shots, all angles at once.
 - **`UBlackEyeFastBakeLibrary`** (built; BlueprintCallable, so Python and agents can drive it): `BakeShot(LS, Options)`,
@@ -522,6 +576,8 @@ Control Rig, ~0.15 s).
 - **P2 batch and UX:** Content Browser batch over a shots folder; bake info (date, range, BEC parameter hash); a stale
   flag when BEC tracks or subject sections change (reusing AutoBake's track-signature idea); re-sync settings.
 - **Bake an edit:** *built 2026-10-07* (§6): the ranges each shot is cut into, plus handles and warm-up.
+- **Bake an edit from the master:** *built 2026-10-07, not yet run* (§6): no reopening, render-like cuts or handles,
+  twins written as data, lock only the baked frames.
 - **P3 speed** (only if needed): the shared subject cache across angles; AutoBake re-bake on change.
 
 **The repro for the Black Eye team** (P1): a tiny map and sequence with a moving Manny, one BEC and a two-shot edit,

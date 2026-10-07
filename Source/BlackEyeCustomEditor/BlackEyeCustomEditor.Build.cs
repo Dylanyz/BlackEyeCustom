@@ -36,6 +36,7 @@ public class BlackEyeCustomEditor : ModuleRules
 				"Slate",
 				"SlateCore",
 				"ToolMenus",
+				"UniversalObjectLocator",
 				"UnrealEd",
 			}
 		);

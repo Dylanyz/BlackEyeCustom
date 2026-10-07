@@ -34,16 +34,23 @@ Three places give the whole picture:
   lock**. It bakes the whole playback range into `<camera>_Bake` and makes the shot's camera cuts play it. The same
   menu then offers **Unlock** (play the live camera) and **Lock**. Every action is one undo step.
 - **Bake an edit:** open an edit (a sequence cutting between shots on a Cinematic Shot track) and click **Bake Edit**
-  on the Sequencer toolbar, or right-click the edit in the Content Browser > **Black Eye: Bake Edit...**. A window
-  asks for **handles** (keyed frames either side of each cut, for trimming later), **warm-up** (unkeyed frames played
-  first, so the camera arrives moving as in playback) and whether to keep each twin's keys from other edits, and
-  lists what it would bake. **Select shot sections first** to bake only those (the window offers "Selected sections"
-  or "Whole edit"). Every Black Eye camera the edit shows is then baked on only the frames the edit uses, one
-  twin per camera, keyed only there. Nested edits are followed; a shot's own Sub tracks (its scene) are not. Console:
-  `BlackEyeCustom.FastBake.BakeEdit [handles] [warmup] [keep 0|1] [lock 0|1] [selected 0|1]`,
-  `BlackEyeCustom.FastBake.EditPlan [handles] [selected 0|1]`.
+  on the Sequencer toolbar, or right-click the edit in the Content Browser > **Black Eye: Bake Edit...**. Every Black
+  Eye camera the edit shows is baked on only the frames the edit uses, one twin per camera. **Select shot sections
+  first** to bake only those. Nested edits are followed; a shot's own Sub tracks (its scene) are not. The window asks:
+  - **How to bake.** *From the master* stays in the edit and plays each shot inside it (nothing is reopened):
+    *Like a render* starts every cut with the camera settled on its subject, as a render does, plus extra frames after
+    each cut; *With handles* also bakes frames before each cut, so the camera is already moving at the cut.
+    *Shot by shot* (the original way) opens each shot alone, with handles and warm-up, then reopens the edit.
+  - **The twin.** Written *directly* as data, or *inside each shot* through Sequencer (the original way); *keys only*
+    or keys and camera setup; keep or replace frames baked before.
+  - **Afterwards the shots play** the bake everywhere, the bake only on the frames baked (the camera cut is split
+    there; the rest stays live Black Eye), or the live camera.
+
+  Console: `BlackEyeCustom.FastBake.BakeEdit [handles] [warmup] [keep 0|1] [lock 0|1|2] [selected 0|1] [mode 0|1|2]
+  [direct 0|1] [setup 0|1]`, `BlackEyeCustom.FastBake.EditPlan [handles] [selected 0|1] [mode 0|1|2]`.
 - **From Python:** `unreal.BlackEyeFastBakeLibrary.bake_shot(sequence, options)` (options: `camera_binding_name`,
-  `start_frame`, `end_frame`, `ranges`, `warm_up_frames`, `keep_other_keys`, `sub_steps`, `lock_after_bake`),
+  `start_frame`, `end_frame`, `ranges`, `warm_up_frames`, `settle_each_range`, `keep_other_keys`, `sub_steps`,
+  `lock_after_bake`, `lock_baked_frames_only`),
   `get_edit_bake_plan(edit, handle_frames)` or `get_sections_bake_plan(sections, handle_frames)` (each entry's `ranges` go straight into `options.ranges`),
   `set_locked(sequence, name, bool)`, `get_bake_info(sequence)`.
 - A frame range bakes only that range; outside it, and between baked ranges, the twin interpolates between the

@@ -78,14 +78,14 @@ namespace BlackEyeFastBake
 		return FFileHelper::SaveStringToFile(Out, *Path);
 	}
 
-	TArray<FBlackEyeBakeRange> NormalizeRanges(TArray<FBlackEyeBakeRange> Ranges)
+	TArray<FBlackEyeBakeRange> NormalizeRanges(TArray<FBlackEyeBakeRange> Ranges, bool bMergeTouching)
 	{
 		Ranges.RemoveAll([](const FBlackEyeBakeRange& R) { return R.EndFrame <= R.StartFrame; });
 		Ranges.Sort([](const FBlackEyeBakeRange& A, const FBlackEyeBakeRange& B) { return A.StartFrame < B.StartFrame; });
 		TArray<FBlackEyeBakeRange> Out;
 		for (const FBlackEyeBakeRange& R : Ranges)
 		{
-			if (Out.Num() && R.StartFrame <= Out.Last().EndFrame)
+			if (Out.Num() && (bMergeTouching ? R.StartFrame <= Out.Last().EndFrame : R.StartFrame < Out.Last().EndFrame))
 			{
 				Out.Last().EndFrame = FMath::Max(Out.Last().EndFrame, R.EndFrame);
 			}
@@ -120,19 +120,22 @@ namespace BlackEyeFastBake
 		return nullptr;
 	}
 
-	/** The Black Eye camera bound in the focused sequence, by binding name or the first one found. */
-	ACineCameraActor* FindCamera(ISequencer& Sequencer, const FString& BindingName, FGuid& InOutBinding)
+	/**
+	 * The Black Eye camera bound in the shot, by binding name or the first one found. SequenceID is the shot's instance:
+	 * the focused one when the shot is open on its own, a sub-sequence instance when it is baked from the master.
+	 */
+	ACineCameraActor* FindCamera(ISequencer& Sequencer, const UMovieScene& MovieScene, FMovieSceneSequenceIDRef SequenceID,
+	                             const FString& BindingName, FGuid& InOutBinding)
 	{
-		const UMovieScene* MovieScene = Sequencer.GetFocusedMovieSceneSequence()->GetMovieScene();
-		for (const FMovieSceneBinding& Binding : MovieScene->GetBindings())
+		for (const FMovieSceneBinding& Binding : MovieScene.GetBindings())
 		{
 			const FGuid Guid = Binding.GetObjectGuid();
 			if (InOutBinding.IsValid() ? Guid != InOutBinding
-				: (!BindingName.IsEmpty() && MovieScene->GetObjectDisplayName(Guid).ToString() != BindingName))
+				: (!BindingName.IsEmpty() && MovieScene.GetObjectDisplayName(Guid).ToString() != BindingName))
 			{
 				continue;
 			}
-			for (const TWeakObjectPtr<>& Bound : Sequencer.FindBoundObjects(Guid, Sequencer.GetFocusedTemplateID()))
+			for (const TWeakObjectPtr<>& Bound : Sequencer.FindBoundObjects(Guid, SequenceID))
 			{
 				AActor* Actor = Cast<AActor>(Bound.Get());
 				if (BlackEyeContract::IsBlackEyeCamera(Actor))
@@ -150,7 +153,7 @@ namespace BlackEyeFastBake
 	 * right camera. A locked shot's cut plays the twin, so a twin maps back to the camera it was baked from; without
 	 * that, a re-bake of a locked shot baked the spare (measured 2026-10-06). Invalid when no cut leads to one.
 	 */
-	FGuid CutCameraBinding(ISequencer& Sequencer, const UMovieScene& MovieScene)
+	FGuid CutCameraBinding(ISequencer& Sequencer, const UMovieScene& MovieScene, FMovieSceneSequenceIDRef SequenceID)
 	{
 		const UMovieSceneCameraCutTrack* Cuts = Cast<UMovieSceneCameraCutTrack>(MovieScene.GetCameraCutTrack());
 		if (!Cuts)
@@ -169,7 +172,7 @@ namespace BlackEyeFastBake
 					Candidate = Twin.Camera;
 				}
 			}
-			if (Candidate.IsValid() && FindCamera(Sequencer, FString(), Candidate))
+			if (Candidate.IsValid() && FindCamera(Sequencer, MovieScene, SequenceID, FString(), Candidate))
 			{
 				return Candidate;
 			}
@@ -177,17 +180,22 @@ namespace BlackEyeFastBake
 		return FGuid();
 	}
 
-	/** Evaluates the root sequence at a display frame, blocking. Root == focused, so no time transform is needed. */
-	void Evaluate(ISequencer& Sequencer, const UMovieScene& MovieScene, FFrameTime DisplayTime)
+	/**
+	 * Evaluates at a display frame of the shot, blocking. The context is in root time: the shot's own when it is root
+	 * (ShotToRoot is identity), the master's when it is baked from there, where the updater maps it back into the shot
+	 * through RootToSequenceTransform (MovieSceneSequenceUpdaters.cpp:719-733).
+	 */
+	void Evaluate(const FBakeTarget& Target, const UMovieScene& Shot, FFrameTime DisplayTime)
 	{
-		const FFrameTime Tick = FFrameRate::TransformTime(DisplayTime, MovieScene.GetDisplayRate(), MovieScene.GetTickResolution());
+		const FFrameTime ShotTick = FFrameRate::TransformTime(DisplayTime, Shot.GetDisplayRate(), Shot.GetTickResolution());
+		const FFrameRate RootRate = Target.Sequencer->GetRootMovieSceneSequence()->GetMovieScene()->GetTickResolution();
 		// Always Stopped, whatever Sequencer is doing: a bake started during playback must not fire what Playing fires
 		// (anim notifies, audio), and must step the same way as one started while parked.
-		FMovieSceneContext Context(FMovieSceneEvaluationRange(Tick, MovieScene.GetTickResolution()), EMovieScenePlayerStatus::Stopped);
+		FMovieSceneContext Context(FMovieSceneEvaluationRange(ShotTick * Target.ShotToRoot, RootRate), EMovieScenePlayerStatus::Stopped);
 		// Jumped, so every track evaluates its absolute state at this frame. Safe only because viewport camera
 		// cuts are off for the bake: with them on, a jump makes every frame a camera cut that snaps the camera [4.1].
 		Context.SetHasJumped((DebugFlags() & 8) == 0);
-		Sequencer.GetEvaluationTemplate().EvaluateSynchronousBlocking(Context);
+		Target.Sequencer->GetEvaluationTemplate().EvaluateSynchronousBlocking(Context);
 	}
 
 	/**
@@ -272,6 +280,7 @@ namespace BlackEyeFastBake
 	{
 		TSharedPtr<ISequencer> Sequencer;
 		FQualifiedFrameTime Time;
+		bool bRestoreTime = true;
 		bool bCameraCuts = true;
 		TWeakObjectPtr<ACineCameraActor> Camera;
 		bool bCameraTick = true;
@@ -306,8 +315,11 @@ namespace BlackEyeFastBake
 			if (Sequencer.IsValid())
 			{
 				Sequencer->SetPerspectiveViewportCameraCutEnabled(bCameraCuts);
-				Sequencer->SetLocalTimeDirectly(Time.Time);
-				Sequencer->ForceEvaluate();
+				if (bRestoreTime)
+				{
+					Sequencer->SetLocalTimeDirectly(Time.Time);
+					Sequencer->ForceEvaluate();
+				}
 			}
 		}
 	};
@@ -327,13 +339,17 @@ FBlackEyeFastBakeReport UBlackEyeFastBakeLibrary::BakeCameraToCsv(ULevelSequence
 
 FBlackEyeFastBakeReport BlackEyeFastBake::RunBake(ULevelSequence* Sequence, const FBlackEyeFastBakeOptions& Options, FBakeOutput& Out)
 {
+	FBakeTarget Target;
 	FBlackEyeFastBakeReport Report;
+	Target.Sequencer = OpenSequencer(Sequence, Report.Message);
+	return Target.Sequencer ? RunBakeIn(Target, Sequence, Options, Out) : Report;
+}
 
-	TSharedPtr<ISequencer> Sequencer = OpenSequencer(Sequence, Report.Message);
-	if (!Sequencer)
-	{
-		return Report;
-	}
+FBlackEyeFastBakeReport BlackEyeFastBake::RunBakeIn(const FBakeTarget& Target, ULevelSequence* Sequence, const FBlackEyeFastBakeOptions& Options, FBakeOutput& Out)
+{
+	FBlackEyeFastBakeReport Report;
+	const TSharedPtr<ISequencer> Sequencer = Target.Sequencer;
+	const FMovieSceneSequenceID ShotID = Target.SequenceID;
 	UMovieScene& MovieScene = *Sequence->GetMovieScene();
 	const FFrameRate DisplayRate = MovieScene.GetDisplayRate();
 	const TRange<FFrameNumber> Playback = MovieScene.GetPlaybackRange();
@@ -345,7 +361,8 @@ FBlackEyeFastBakeReport BlackEyeFastBake::RunBake(ULevelSequence* Sequence, cons
 	const float Dt = static_cast<float>(DisplayRate.AsInterval());
 
 	// What gets keyed: Options.Ranges (an edit's used frames plus handles), else [Start, End).
-	const TArray<FBlackEyeBakeRange> Keyed = NormalizeRanges(Options.Ranges.Num() ? Options.Ranges : TArray<FBlackEyeBakeRange>{ { Start, End } });
+	const TArray<FBlackEyeBakeRange> Keyed = NormalizeRanges(Options.Ranges.Num() ? Options.Ranges : TArray<FBlackEyeBakeRange>{ { Start, End } },
+		!Options.bSettleEachRange);
 	if (Keyed.Num() == 0)
 	{
 		Report.Message = FString::Printf(TEXT("empty range [%d, %d)"), Start, End);
@@ -353,12 +370,15 @@ FBlackEyeFastBakeReport BlackEyeFastBake::RunBake(ULevelSequence* Sequence, cons
 	}
 	// What gets stepped: runs, each opening with the snap, the settle and the warm-up. Keyed spans closer together than
 	// the warm-up share a run, because stepping through the gap costs no more than a new warm-up and keeps the
-	// damping continuous, as playback would; the gap itself isn't keyed.
+	// damping continuous, as playback would; the gap itself isn't keyed. Settling each range (a render's camera cut
+	// on every span the edit shows) never shares a run.
+	// BE-NATIVE: an editor camera cut that snaps on every cut, as game and render do (DESIGN section 7), would give
+	// live playback of an edit the same starts.
 	struct FRun { int32 Start; int32 End; };
 	TArray<FRun> Runs;
 	for (const FBlackEyeBakeRange& K : Keyed)
 	{
-		if (Runs.Num() && K.StartFrame - WarmUp <= Runs.Last().End)
+		if (Runs.Num() && !Options.bSettleEachRange && K.StartFrame - WarmUp <= Runs.Last().End)
 		{
 			Runs.Last().End = K.EndFrame;
 		}
@@ -382,6 +402,7 @@ FBlackEyeFastBakeReport BlackEyeFastBake::RunBake(ULevelSequence* Sequence, cons
 	FRestore Restore;
 	Restore.Sequencer = Sequencer;
 	Restore.Time = Sequencer->GetLocalTime();
+	Restore.bRestoreTime = Target.bRestoreView;
 	Restore.bCameraCuts = Sequencer->IsPerspectiveViewportCameraCutEnabled();
 	// BE-NATIVE: an editor camera cut that snaps correctly would make this unnecessary (DESIGN §7).
 	if ((DebugFlags() & 1) == 0)
@@ -390,10 +411,10 @@ FBlackEyeFastBakeReport BlackEyeFastBake::RunBake(ULevelSequence* Sequence, cons
 	}
 
 	// Spawnables exist only once evaluated, so evaluate the first frame before looking for the camera.
-	Evaluate(*Sequencer, MovieScene, FFrameTime(WarmUpStart));
+	Evaluate(Target, MovieScene, FFrameTime(WarmUpStart));
 	// No name given: the camera the cuts play (through a twin if locked), and only then the first Black Eye camera.
-	FGuid Binding = Options.CameraBindingName.IsEmpty() ? CutCameraBinding(*Sequencer, MovieScene) : FGuid();
-	ACineCameraActor* Camera = FindCamera(*Sequencer, Options.CameraBindingName, Binding);
+	FGuid Binding = Options.CameraBindingName.IsEmpty() ? CutCameraBinding(*Sequencer, MovieScene, ShotID) : FGuid();
+	ACineCameraActor* Camera = FindCamera(*Sequencer, MovieScene, ShotID, Options.CameraBindingName, Binding);
 	if (!Camera)
 	{
 		Report.Message = TEXT("no Black Eye camera bound in the sequence") +
@@ -445,7 +466,7 @@ FBlackEyeFastBakeReport BlackEyeFastBake::RunBake(ULevelSequence* Sequence, cons
 			++GFrameCounter;
 		}
 		double T = FPlatformTime::Seconds();
-		Evaluate(*Sequencer, MovieScene, (DebugFlags() & 16) ? FFrameTime(RunStart) : Time);
+		Evaluate(Target, MovieScene, (DebugFlags() & 16) ? FFrameTime(RunStart) : Time);
 		{
 			const UE::Anim::FEvaluationForCachingScope CachingScope(StepDt);
 			FConstraintsManagerController::Get(World).EvaluateAllConstraints();
@@ -453,7 +474,7 @@ FBlackEyeFastBakeReport BlackEyeFastBake::RunBake(ULevelSequence* Sequence, cons
 		TEval += FPlatformTime::Seconds() - T;
 
 		// Spawnables re-spawn at section boundaries, so resolve the camera and subjects every step [4.8].
-		ACineCameraActor* Current = FindCamera(*Sequencer, FString(), Binding);
+		ACineCameraActor* Current = FindCamera(*Sequencer, MovieScene, ShotID, FString(), Binding);
 		if (!Current)
 		{
 			Report.Message = FString::Printf(TEXT("camera binding stopped resolving at frame %d"), Frame);
@@ -611,6 +632,7 @@ FBlackEyeFastBakeReport BlackEyeFastBake::RunBake(ULevelSequence* Sequence, cons
 	Report.Message = Report.bCameraMoved ? TEXT("ok") : TEXT("the camera never moved: no valid viewport, or no subjects");
 	Out.Sequencer = Sequencer;
 	Out.CameraBinding = Binding;
+	Out.Camera = Camera;
 	Out.Samples = MoveTemp(Samples);
 	UE_LOG(LogBlackEyeCustom, Display, TEXT("[BlackEyeCustom] Fast Bake %s: %d frames in %.2fs, %.2f ms/frame (eval %.2f, meshes %.2f x%d, tick %.3f), %.1fx realtime: %s"),
 		*Report.CameraLabel, Report.NumFrames, Report.TotalSeconds, Report.MsPerFrame, Report.MsEvaluate, Report.MsRefreshMeshes,
@@ -626,9 +648,10 @@ bool UBlackEyeFastBakeLibrary::StartRealtimeRecord(ULevelSequence* Sequence, con
 	FString Error;
 	TSharedPtr<ISequencer> Sequencer = OpenSequencer(Sequence, Error);
 	// Same camera choice as the bake, so a record and a bake of a shot compare the same camera.
+	const UMovieScene* MovieScene = Sequence ? Sequence->GetMovieScene() : nullptr;
 	FGuid Binding = Sequencer && CameraBindingName.IsEmpty()
-		? CutCameraBinding(*Sequencer, *Sequencer->GetFocusedMovieSceneSequence()->GetMovieScene()) : FGuid();
-	ACineCameraActor* Camera = Sequencer ? FindCamera(*Sequencer, CameraBindingName, Binding) : nullptr;
+		? CutCameraBinding(*Sequencer, *MovieScene, MovieSceneSequenceID::Root) : FGuid();
+	ACineCameraActor* Camera = Sequencer ? FindCamera(*Sequencer, *MovieScene, MovieSceneSequenceID::Root, CameraBindingName, Binding) : nullptr;
 	if (!Camera)
 	{
 		UE_LOG(LogBlackEyeCustom, Warning, TEXT("[BlackEyeCustom] realtime record: no Black Eye camera (%s)"), *Error);
@@ -647,10 +670,10 @@ bool UBlackEyeFastBakeLibrary::StartRealtimeRecord(ULevelSequence* Sequence, con
 			return;
 		}
 		FGuid Binding = RecordBinding;
-		ACineCameraActor* Cam = FindCamera(*Seq, FString(), Binding);
+		const UMovieScene* MovieScene = Seq->GetFocusedMovieSceneSequence()->GetMovieScene();
+		ACineCameraActor* Cam = FindCamera(*Seq, *MovieScene, Seq->GetFocusedTemplateID(), FString(), Binding);
 		if (Cam && Cam->GetWorld() == World)
 		{
-			const UMovieScene* MovieScene = Seq->GetFocusedMovieSceneSequence()->GetMovieScene();
 			RecordSamples.Add(Sample(Cam, Seq->GetLocalTime().ConvertTo(MovieScene->GetDisplayRate()).AsDecimal()));
 		}
 	});
