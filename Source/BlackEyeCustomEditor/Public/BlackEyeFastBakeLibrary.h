@@ -106,6 +106,12 @@ struct FBlackEyeFastBakeOptions
 
 	/** Appended to the progress dialog's title (a batch's "shot 2 of 5"). Not reflected. */
 	FString ProgressNote;
+
+	/** Which of the camera's bake cameras (twins) to write; invalid: the one its cuts play, else the newest. Not reflected. */
+	FGuid TwinBinding;
+
+	/** Write a new bake camera beside the camera's others, instead of rewriting one. Not reflected. */
+	bool bCreateNewTwin = false;
 };
 
 /** What one bake did, and what it cost. */
@@ -162,6 +168,10 @@ struct FBlackEyeShotBakePlan
 
 	/** Bake Edit from the master: one section of the edit showing this shot (where the shot is reached from). */
 	TWeakObjectPtr<UMovieSceneSubSection> FirstSection;
+
+	/** The Bake Edit window's bake camera choice for this camera (FBlackEyeFastBakeOptions::TwinBinding, bCreateNewTwin). */
+	FGuid TwinBinding;
+	bool bCreateNewTwin = false;
 };
 
 /**

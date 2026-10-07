@@ -29,7 +29,9 @@
 #include "ToolMenus.h"
 #include "Tracks/MovieSceneCameraCutTrack.h"
 #include "Tracks/MovieSceneCinematicShotTrack.h"
+#include "Widgets/Images/SImage.h"
 #include "Widgets/Input/SButton.h"
+#include "Widgets/Input/SComboBox.h"
 #include "Widgets/Input/SCheckBox.h"
 #include "Widgets/Input/SSpinBox.h"
 #include "Widgets/Layout/SBorder.h"
@@ -144,7 +146,7 @@ namespace BlackEyeFastBake
 				FGuid Camera = Cut->GetCameraBindingID().GetGuid();
 				for (const FTwin& Twin : Twins)
 				{
-					if (Twin.Twin == Camera || Twin.Stale.Contains(Camera))
+					if (Twin.Alive.Contains(Camera) || Twin.Stale.Contains(Camera))
 					{
 						Camera = Twin.Camera;
 					}
@@ -225,6 +227,44 @@ namespace BlackEyeFastBake
 				}
 			}
 		}
+	}
+
+	TArray<FShotCamera> ListShotCameras(ULevelSequence* Shot)
+	{
+		TArray<FShotCamera> Out;
+		const UMovieScene* MovieScene = Shot ? Shot->GetMovieScene() : nullptr;
+		const UClass* BlackEye = BlackEyeContract::GetCameraBaseClass();
+		if (!MovieScene || !BlackEye)
+		{
+			return Out;
+		}
+		// Data only: binding classes from spawnable templates or possessable classes, the cuts, the twin tags.
+		const TSharedRef<UE::MovieScene::FSharedPlaybackState> State = MovieSceneHelpers::CreateTransientSharedPlaybackState(GWorld, Shot);
+		const TArray<Edit::FCutCamera> Cuts = Edit::CutCameras(Shot);
+		const TArray<FTwin> Twins = FindTwins(*MovieScene);
+		for (const FMovieSceneBinding& Binding : MovieScene->GetBindings())
+		{
+			const FGuid Guid = Binding.GetObjectGuid();
+			const UClass* Class = Edit::BindingClass(Shot, Guid, State);
+			if (!Class || !Class->IsChildOf(BlackEye))
+			{
+				continue;
+			}
+			FShotCamera& Camera = Out.AddDefaulted_GetRef();
+			Camera.Camera = Guid;
+			Camera.Name = MovieScene->GetObjectDisplayName(Guid).ToString();
+			Camera.bOnCut = Cuts.ContainsByPredicate([&Guid](const Edit::FCutCamera& Cut) { return Cut.Camera == Guid; });
+			for (const FTwin& Twin : Twins)
+			{
+				if (Twin.Camera == Guid)
+				{
+					Camera.Twins = Twin.Alive;
+					Camera.DefaultTwin = DefaultTwin(*MovieScene, Twin);
+				}
+			}
+		}
+		Out.StableSort([](const FShotCamera& A, const FShotCamera& B) { return A.bOnCut && !B.bOnCut; });
+		return Out;
 	}
 
 	TArray<FBlackEyeShotBakePlan> GetEditBakePlan(ULevelSequence* EditSequence, int32 HandleFrames, TConstArrayView<const UMovieSceneSubSection*> Only)
@@ -349,6 +389,133 @@ namespace BlackEyeFastBake
 		}
 
 		/**
+		 * The window's shot controls: one shot, from a single selected shot section, or the shot Sequencer has open with
+		 * nothing selected. Which of its Black Eye cameras to bake and lock, and into which bake camera. Read from the
+		 * shot's data only (bindings, cuts, tags), nothing spawned or evaluated, so it is listed as the window opens.
+		 */
+		struct FShotTarget
+		{
+			TWeakObjectPtr<ULevelSequence> Shot;
+			TWeakObjectPtr<UMovieSceneSubSection> Section; // the selected section showing it; null: the shot itself is open
+			TRange<FFrameNumber> SectionTicks = TRange<FFrameNumber>::All(); // shot ticks that section shows
+			TArray<FShotCamera> Cameras;
+			int32 Camera = 0;        // into Cameras
+			int32 Twin = INDEX_NONE; // into the camera's Twins; INDEX_NONE: create a new bake camera
+			bool bSectionOnly = true;
+			double MsListed = 0.0;
+
+			const FShotCamera* Current() const { return Cameras.IsValidIndex(Camera) ? &Cameras[Camera] : nullptr; }
+
+			FGuid TwinGuid() const
+			{
+				const FShotCamera* C = Current();
+				return C && C->Twins.IsValidIndex(Twin) ? C->Twins[Twin] : FGuid();
+			}
+
+			/** Lock and unlock act here: the section's frames, or the whole shot. */
+			TRange<FFrameNumber> LockSpan() const
+			{
+				return Section.IsValid() && bSectionOnly ? SectionTicks : TRange<FFrameNumber>::All();
+			}
+
+			/** The default bake camera of the current camera: the one its cuts play, else the newest, else a new one. */
+			void PickDefaultTwin()
+			{
+				const FShotCamera* C = Current();
+				Twin = C ? C->Twins.IndexOfByKey(C->DefaultTwin) : INDEX_NONE;
+			}
+
+			/** This shot's plan entry for the chosen camera and bake camera, from the edit's plan or the shot's own cuts. */
+			TArray<FBlackEyeShotBakePlan> Plan(TArray<FBlackEyeShotBakePlan> EditPlans, bool bSettleAtCut) const
+			{
+				ULevelSequence* ShotSequence = Shot.Get();
+				const FShotCamera* C = Current();
+				if (!ShotSequence || !C)
+				{
+					return {};
+				}
+				FBlackEyeShotBakePlan* Found = EditPlans.FindByPredicate([&](const FBlackEyeShotBakePlan& P) { return P.Shot == ShotSequence && P.CameraBindingName == C->Name; });
+				FBlackEyeShotBakePlan Plan;
+				if (Found)
+				{
+					Plan = *Found;
+				}
+				else
+				{
+					// The shot open on its own, or a camera the section's cuts don't play: the camera's cuts within the
+					// shot's playback range (the section's frames when there is one), else all of it.
+					const UMovieScene* MovieScene = ShotSequence->GetMovieScene();
+					const TRange<FFrameNumber> Window = TRange<FFrameNumber>::Intersection(MovieScene->GetPlaybackRange(), SectionTicks);
+					auto ToDisplay = [MovieScene](FFrameNumber Tick, bool bCeil)
+					{
+						const FFrameTime T = FFrameRate::TransformTime(FFrameTime(Tick), MovieScene->GetTickResolution(), MovieScene->GetDisplayRate());
+						return bCeil ? T.CeilToFrame().Value : T.FloorToFrame().Value;
+					};
+					auto Add = [&](const TRange<FFrameNumber>& Ticks)
+					{
+						if (!Ticks.IsEmpty() && Ticks.HasLowerBound() && Ticks.HasUpperBound())
+						{
+							Plan.Ranges.Add({ ToDisplay(Ticks.GetLowerBoundValue(), false), ToDisplay(Ticks.GetUpperBoundValue(), true) });
+						}
+					};
+					for (const FCutCamera& Cut : CutCameras(ShotSequence))
+					{
+						if (Cut.Camera == C->Camera)
+						{
+							Add(TRange<FFrameNumber>::Intersection(Cut.Range, Window));
+						}
+					}
+					if (Plan.Ranges.Num() == 0)
+					{
+						Add(Window);
+					}
+					Plan.Ranges = NormalizeRanges(MoveTemp(Plan.Ranges), !bSettleAtCut);
+					Plan.Shot = ShotSequence;
+					Plan.CameraBindingName = C->Name;
+					Plan.NumUses = 1;
+					Plan.FirstSection = Section;
+				}
+				Plan.TwinBinding = TwinGuid();
+				Plan.bCreateNewTwin = !Plan.TwinBinding.IsValid();
+				return Plan.Ranges.Num() ? TArray<FBlackEyeShotBakePlan>{ Plan } : TArray<FBlackEyeShotBakePlan>();
+			}
+		};
+
+		/** The shot controls for a scope, or null when it isn't about one shot (FShotTarget). */
+		TSharedPtr<FShotTarget> MakeShotTarget(ULevelSequence* Edit, TConstArrayView<TWeakObjectPtr<UMovieSceneSubSection>> Selected)
+		{
+			TSharedRef<FShotTarget> Target = MakeShared<FShotTarget>();
+			UMovieSceneSubSection* Section = Selected.Num() == 1 ? Selected[0].Get() : nullptr;
+			ULevelSequence* Shot = Section ? Cast<ULevelSequence>(Section->GetSequence()) : (Selected.Num() == 0 ? Edit : nullptr);
+			if (!Shot)
+			{
+				return nullptr;
+			}
+			const double T0 = FPlatformTime::Seconds();
+			Target->Cameras = ListShotCameras(Shot);
+			Target->MsListed = 1000.0 * (FPlatformTime::Seconds() - T0);
+			UE_LOG(LogBlackEyeCustom, Display, TEXT("[BlackEyeCustom] Bake Edit: %d Black Eye camera(s) in %s listed in %.2f ms"),
+				Target->Cameras.Num(), *Shot->GetName(), Target->MsListed);
+			if (Target->Cameras.Num() == 0)
+			{
+				return nullptr; // a nested edit, or a sequence without a Black Eye camera
+			}
+			Target->Shot = Shot;
+			Target->Section = Section;
+			if (Section)
+			{
+				const TRange<FFrameTime> Inner = Section->OuterToInnerTransform().ComputeTraversedHull(Section->GetRange());
+				if (!Inner.IsEmpty() && Inner.HasLowerBound() && Inner.HasUpperBound())
+				{
+					Target->SectionTicks = TRange<FFrameNumber>(Inner.GetLowerBoundValue().FloorToFrame(), Inner.GetUpperBoundValue().CeilToFrame());
+				}
+			}
+			Target->Camera = FMath::Max(0, Target->Cameras.IndexOfByPredicate([](const FShotCamera& C) { return C.bOnCut; }));
+			Target->PickDefaultTwin();
+			return Target;
+		}
+
+		/**
 		 * What one Bake Edit covers: the whole edit, or the sections selected in it. Every entry point builds one and
 		 * hands it to the same dialog and batch, so the two ways in never drift apart.
 		 */
@@ -358,6 +525,22 @@ namespace BlackEyeFastBake
 			TArray<TWeakObjectPtr<UMovieSceneSubSection>> Selected; // its selected shot sections, maybe none
 			TWeakObjectPtr<ULevelSequence> ReturnTo;                // the Sequencer's root when started, reopened at the end
 			bool bSelectedOnly = false;
+			TSharedPtr<FShotTarget> Target;                         // one shot's controls, when the scope is about one shot
+			TWeakPtr<ISequencer> Sequencer;                         // where it was opened from, refreshed after lock / unlock
+
+			/** The shot controls decide what is baked: one selected section's shot, or the shot open with nothing selected. */
+			bool TargetBakes() const
+			{
+				return Target.IsValid() && (Target->Section.IsValid() ? bSelectedOnly : true);
+			}
+
+			void EnsureTarget()
+			{
+				if (!Target.IsValid())
+				{
+					Target = MakeShotTarget(Edit.Get(), Selected);
+				}
+			}
 
 			TArray<FBlackEyeShotBakePlan> Plan(const FEditBakeSettings& Settings) const
 			{
@@ -378,12 +561,17 @@ namespace BlackEyeFastBake
 				{
 					return {}; // every selected section is gone
 				}
-				return GetEditBakePlan(Edit.Get(), HeadFrames, TailFrames, bSettleAtCut, Only);
+				TArray<FBlackEyeShotBakePlan> Plans = GetEditBakePlan(Edit.Get(), HeadFrames, TailFrames, bSettleAtCut, Only);
+				return TargetBakes() ? Target->Plan(MoveTemp(Plans), bSettleAtCut) : Plans;
 			}
 
 			FString Describe() const
 			{
 				const FString Name = Edit.IsValid() ? Edit->GetName() : FString();
+				if (TargetBakes() && !Target->Section.IsValid())
+				{
+					return FString::Printf(TEXT("shot %s"), *Name);
+				}
 				return bSelectedOnly ? FString::Printf(TEXT("%d selected section(s) of %s"), Selected.Num(), *Name) : Name;
 			}
 		};
@@ -414,6 +602,7 @@ namespace BlackEyeFastBake
 			Scope.ReturnTo = Cast<ULevelSequence>(Sequencer.GetRootMovieSceneSequence());
 			Scope.Selected = SelectedShotSections(Sequencer);
 			Scope.bSelectedOnly = Scope.Selected.Num() > 0;
+			Scope.Sequencer = Sequencer.AsShared();
 			return Scope;
 		}
 
@@ -594,8 +783,10 @@ namespace BlackEyeFastBake
 			});
 		}
 
-		void StartBatch(const FBakeScope& Scope, const FEditBakeSettings& Settings)
+		void StartBatch(const FBakeScope& InScope, const FEditBakeSettings& Settings)
 		{
+			FBakeScope Scope = InScope;
+			Scope.EnsureTarget();
 			if (Settings.FromMaster())
 			{
 				RunNextTick([Scope, Settings]() { StartMaster(Scope, Settings); });
@@ -622,6 +813,193 @@ namespace BlackEyeFastBake
 			RunNextTick([Batch]() { BakeNext(Batch); });
 		}
 
+		/**
+		 * The window's shot controls (FShotTarget): which Black Eye camera, which bake camera (or a new one), and lock /
+		 * unlock for the selected section or the whole shot, acting at once, one undo step each.
+		 */
+		TSharedRef<SWidget> MakeShotBox(const TSharedRef<FBakeScope>& Scope)
+		{
+			const TSharedPtr<FShotTarget> Target = Scope->Target;
+			if (!Target.IsValid())
+			{
+				return SNullWidget::NullWidget;
+			}
+			struct FOptions
+			{
+				TArray<TSharedPtr<FString>> Cameras;
+				TArray<TSharedPtr<FString>> Twins;
+				TSharedPtr<SComboBox<TSharedPtr<FString>>> TwinCombo;
+				FString Status;
+			};
+			const TSharedRef<FOptions> Options = MakeShared<FOptions>();
+			const UMovieScene* MovieScene = Target->Shot.IsValid() ? Target->Shot->GetMovieScene() : nullptr;
+			for (const FShotCamera& C : Target->Cameras)
+			{
+				Options->Cameras.Add(MakeShared<FString>(C.bOnCut ? C.Name + TEXT("   (on the camera cut)") : C.Name));
+			}
+			// The bake cameras of the current camera, and "Create new" last.
+			auto RebuildTwins = [Target, Options, MovieScene]()
+			{
+				Options->Twins.Reset();
+				if (const FShotCamera* C = Target->Current())
+				{
+					for (const FGuid& Twin : C->Twins)
+					{
+						const FString Name = MovieScene ? MovieScene->GetObjectDisplayName(Twin).ToString() : Twin.ToString();
+						Options->Twins.Add(MakeShared<FString>(Twin == C->DefaultTwin ? Name + TEXT("   (current)") : Name));
+					}
+				}
+				Options->Twins.Add(MakeShared<FString>(TEXT("Create new +")));
+				if (Options->TwinCombo)
+				{
+					Options->TwinCombo->RefreshOptions();
+				}
+			};
+			RebuildTwins();
+			auto RefreshStatus = [Target, Options]()
+			{
+				const FShotCamera* C = Target->Current();
+				const ULevelSequence* Shot = Target->Shot.Get();
+				Options->Status = C && Shot ? DescribeCutPlay(*Shot->GetMovieScene(), C->Camera, Target->LockSpan()) : FString();
+			};
+			RefreshStatus();
+			auto Text = [](TSharedPtr<FString> Item) -> TSharedRef<SWidget> { return SNew(STextBlock).Text(FText::FromString(Item.IsValid() ? *Item : FString())); };
+
+			auto SetLock = [Scope, Target, RefreshStatus, RebuildTwins](bool bLock)
+			{
+				const FShotCamera* C = Target->Current();
+				const int32 Changed = C ? SetShotCameraLock(Target->Shot.Get(), C->Camera, Target->TwinGuid(), bLock, Target->LockSpan()) : 0;
+				// Which bake camera is "current" may have changed; the list's order doesn't.
+				const TArray<FShotCamera> Fresh = ListShotCameras(Target->Shot.Get());
+				if (Fresh.Num() == Target->Cameras.Num())
+				{
+					Target->Cameras = Fresh;
+					RebuildTwins();
+				}
+				if (const TSharedPtr<ISequencer> Sequencer = Scope->Sequencer.Pin())
+				{
+					Sequencer->NotifyMovieSceneDataChanged(EMovieSceneDataChangeType::MovieSceneStructureItemsChanged);
+					Sequencer->ForceEvaluate();
+				}
+				RefreshStatus();
+				UE_LOG(LogBlackEyeCustom, Display, TEXT("[BlackEyeCustom] %s %s: %d camera cut section(s) changed"),
+					bLock ? TEXT("lock") : TEXT("unlock"), *GetNameSafe(Target->Shot.Get()), Changed);
+				return FReply::Handled();
+			};
+			auto Button = [](const FName& Icon, const FText& Label, const FText& Tip, TFunction<FReply()> OnClick, TAttribute<bool> Enabled)
+			{
+				return SNew(SButton)
+					.IsEnabled(Enabled)
+					.ToolTipText(Tip)
+					.OnClicked_Lambda([OnClick]() { return OnClick(); })
+					[
+						SNew(SHorizontalBox)
+						+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0, 0, 4, 0)[ SNew(SImage).Image(FAppStyle::GetBrush(Icon)) ]
+						+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)[ SNew(STextBlock).Text(Label) ]
+					];
+			};
+			auto Row = [](const FText& Label, TSharedRef<SWidget> Widget)
+			{
+				return SNew(SHorizontalBox)
+					+ SHorizontalBox::Slot().FillWidth(0.3f).VAlign(VAlign_Center)[ SNew(STextBlock).Text(Label) ]
+					+ SHorizontalBox::Slot().FillWidth(0.7f)[ Widget ];
+			};
+
+			const FText Title = FText::Format(Target->Section.IsValid() ? LOCTEXT("ShotFromSection", "This shot: {0} (the selected section)")
+			                                                            : LOCTEXT("ShotItself", "This shot: {0}"),
+				FText::FromString(GetNameSafe(Target->Shot.Get())));
+
+			return SNew(SBorder).BorderImage(FAppStyle::GetBrush("ToolPanel.DarkGroupBorder")).Padding(8)
+			[
+				SNew(SVerticalBox)
+				+ SVerticalBox::Slot().AutoHeight()[ SNew(STextBlock).Text(Title).Font(FAppStyle::GetFontStyle("BoldFont")) ]
+				+ SVerticalBox::Slot().AutoHeight().Padding(0, 6, 0, 2)
+				[
+					Row(LOCTEXT("ShotCamera", "Black Eye camera"),
+						SNew(SComboBox<TSharedPtr<FString>>)
+						.OptionsSource(&Options->Cameras)
+						.OnGenerateWidget_Lambda(Text)
+						.OnSelectionChanged_Lambda([Target, Options, RebuildTwins, RefreshStatus](TSharedPtr<FString> Item, ESelectInfo::Type)
+						{
+							const int32 Index = Options->Cameras.IndexOfByKey(Item);
+							if (Index != INDEX_NONE && Index != Target->Camera)
+							{
+								Target->Camera = Index;
+								Target->PickDefaultTwin();
+								RebuildTwins();
+								RefreshStatus();
+							}
+						})
+						[ SNew(STextBlock).Text_Lambda([Target]() { const FShotCamera* C = Target->Current(); return FText::FromString(C ? C->Name : FString()); }) ])
+				]
+				+ SVerticalBox::Slot().AutoHeight().Padding(0, 2)
+				[
+					Row(LOCTEXT("ShotTwin", "Bake camera"),
+						SAssignNew(Options->TwinCombo, SComboBox<TSharedPtr<FString>>)
+						.OptionsSource(&Options->Twins)
+						.OnGenerateWidget_Lambda(Text)
+						.OnSelectionChanged_Lambda([Target, Options](TSharedPtr<FString> Item, ESelectInfo::Type)
+						{
+							const int32 Index = Options->Twins.IndexOfByKey(Item);
+							if (Index != INDEX_NONE)
+							{
+								Target->Twin = Index == Options->Twins.Num() - 1 ? INDEX_NONE : Index;
+							}
+						})
+						.ToolTipText(LOCTEXT("ShotTwinTip", "The plain camera this Black Eye camera is baked into. A camera can have several; "
+						                                    "\"Create new +\" bakes into a new one beside them."))
+						[
+							SNew(STextBlock).Text_Lambda([Target, MovieScene]()
+							{
+								const FGuid Twin = Target->TwinGuid();
+								return Twin.IsValid() && MovieScene ? MovieScene->GetObjectDisplayName(Twin) : LOCTEXT("CreateNew", "Create new +");
+							})
+						])
+				]
+				+ SVerticalBox::Slot().AutoHeight().Padding(0, 6, 0, 2)
+				[
+					SNew(SHorizontalBox)
+					+ SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 6, 0)
+					[
+						Button("Icons.Lock", LOCTEXT("LockNow", "Lock"),
+							LOCTEXT("LockNowTip", "The camera cut plays the bake camera (here, or in the whole shot)."),
+							[SetLock]() { return SetLock(true); },
+							TAttribute<bool>::CreateLambda([Target]() { return Target->TwinGuid().IsValid(); }))
+					]
+					+ SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 12, 0)
+					[
+						Button("Icons.Unlock", LOCTEXT("UnlockNow", "Unlock"),
+							LOCTEXT("UnlockNowTip", "The camera cut plays the live Black Eye camera again (here, or in the whole shot)."),
+							[SetLock]() { return SetLock(false); },
+							TAttribute<bool>::CreateLambda([Target]() { return Target->Current() && Target->Current()->Twins.Num() > 0; }))
+					]
+					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+					[
+						SNew(SCheckBox)
+						.IsEnabled(Target->Section.IsValid())
+						.IsChecked_Lambda([Target]() { return Target->Section.IsValid() && Target->bSectionOnly ? ECheckBoxState::Checked : ECheckBoxState::Unchecked; })
+						.OnCheckStateChanged_Lambda([Target, RefreshStatus](ECheckBoxState S) { Target->bSectionOnly = S == ECheckBoxState::Checked; RefreshStatus(); })
+						.ToolTipText(LOCTEXT("SectionOnlyTip", "On: lock and unlock change only the frames this section shows (the shot's camera cut "
+						                                       "is split there). Off: the whole shot, in every edit that uses it."))
+						[ SNew(STextBlock).Text(LOCTEXT("SectionOnly", "Only this section")) ]
+					]
+				]
+				+ SVerticalBox::Slot().AutoHeight().Padding(0, 4, 0, 0)
+				[
+					SNew(STextBlock).AutoWrapText(true)
+					.Text_Lambda([Options]() { return FText::Format(LOCTEXT("NowPlays", "Now plays: {0}"), FText::FromString(Options->Status)); })
+				]
+				+ SVerticalBox::Slot().AutoHeight().Padding(0, 2, 0, 0)
+				[
+					SNew(STextBlock).AutoWrapText(true).ColorAndOpacity(FSlateColor::UseSubduedForeground())
+					.Text(FText::Format(LOCTEXT("ShotNote", "Baking uses this camera and bake camera when it bakes just this shot ({0}). "
+					                                       "Cameras found in {1} ms."),
+						Target->Section.IsValid() ? LOCTEXT("ShotNoteSection", "\"Selected sections\"") : LOCTEXT("ShotNoteOpen", "the shot open here"),
+						FText::FromString(FString::Printf(TEXT("%.2f"), Target->MsListed))))
+				]
+			];
+		}
+
 		/** The dialog: how to bake, the twin, lock, and what that would bake. Starts the batch on Bake. */
 		void OpenDialog(const FBakeScope& InScope)
 		{
@@ -633,18 +1011,25 @@ namespace BlackEyeFastBake
 			TSharedRef<FEditBakeSettings> Settings = MakeShared<FEditBakeSettings>();
 			Settings->Load();
 			TSharedRef<FBakeScope> Scope = MakeShared<FBakeScope>(InScope);
+			Scope->EnsureTarget();
 			bool bBake = false;
 
 			// The summary follows the settings; the plan is re-made only when what it depends on changes.
-			struct FPlanCache { int32 Handles = INDEX_NONE; int32 Mode = INDEX_NONE; bool bSelectedOnly = false; TArray<FBlackEyeShotBakePlan> Plans; };
+			struct FPlanCache { int32 Handles = INDEX_NONE; int32 Mode = INDEX_NONE; bool bSelectedOnly = false; int32 Camera = INDEX_NONE; int32 Twin = INDEX_NONE;
+			                    TArray<FBlackEyeShotBakePlan> Plans; };
 			TSharedRef<FPlanCache> Cache = MakeShared<FPlanCache>();
 			auto CurrentPlans = [Scope, Settings, Cache]() -> const TArray<FBlackEyeShotBakePlan>&
 			{
-				if (Cache->Handles != Settings->HandleFrames || Cache->Mode != Settings->Mode || Cache->bSelectedOnly != Scope->bSelectedOnly)
+				const int32 Camera = Scope->Target ? Scope->Target->Camera : INDEX_NONE;
+				const int32 Twin = Scope->Target ? Scope->Target->Twin : INDEX_NONE;
+				if (Cache->Handles != Settings->HandleFrames || Cache->Mode != Settings->Mode || Cache->bSelectedOnly != Scope->bSelectedOnly
+					|| Cache->Camera != Camera || Cache->Twin != Twin)
 				{
 					Cache->Handles = Settings->HandleFrames;
 					Cache->Mode = Settings->Mode;
 					Cache->bSelectedOnly = Scope->bSelectedOnly;
+					Cache->Camera = Camera;
+					Cache->Twin = Twin;
 					Cache->Plans = Scope->Plan(*Settings);
 				}
 				return Cache->Plans;
@@ -773,6 +1158,10 @@ namespace BlackEyeFastBake
 								[ ScopeChoice(true, FText::Format(LOCTEXT("ScopeSelected", "Selected sections ({0})"), Scope->Selected.Num())) ]
 								+ SHorizontalBox::Slot().AutoWidth()
 								[ ScopeChoice(false, LOCTEXT("ScopeWhole", "Whole edit")) ]
+							]
+							+ SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 8)
+							[
+								MakeShotBox(Scope)
 							]
 
 							// 1. How to bake

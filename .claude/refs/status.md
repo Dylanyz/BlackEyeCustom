@@ -11,7 +11,8 @@ things stand and what to do next.
   (planner, bake, keep-other-keys, seams). Selected-sections mode added the same day. DESIGN §6.
 - **Bake Edit from the master: built 2026-10-07, compiled, NOT installed or run** (the editor was in use). The
   window's new default; shot by shot is unchanged. Also new in every mode: twins written as data, lock only the baked
-  frames. DESIGN §6 "Bake Edit from the master".
+  frames. DESIGN §6 "Bake Edit from the master". Shot controls (camera / bake camera choice, Lock / Unlock, several
+  bake cameras per camera) built the same day, also not run.
 - **P2 (batch, stale flag, re-sync settings): not started.** DESIGN §10.
 
 ## Open issues
@@ -20,7 +21,8 @@ things stand and what to do next.
   (`EditPlan 10 0 0|1|2`); a master bake matches a shot-by-shot bake on the frames both bake; Like a render snaps at
   every span start; direct twins (new and existing) spawn, key, lock and undo; Keys and setup respawns the twin;
   lock-baked-only splits the cut; the "inside each shot" writer under the master; time the first editor frame after
-  a master bake (recompile risk). Then the window by eye, then a `_BAKE-TEST` copy of the production master with
+  a master bake (recompile risk). Shot controls: listing time, camera and bake camera choice, Create new, Lock /
+  Unlock per section and whole shot, the binding menu still locking/unlocking right with several bake cameras. Then the window by eye, then a `_BAKE-TEST` copy of the production master with
   Dylan's say-so.
 
 - Bake Edit: the Sequencer toolbar button and the dialog haven't been seen yet (computer use was denied while testing;

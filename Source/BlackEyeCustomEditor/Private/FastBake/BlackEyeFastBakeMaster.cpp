@@ -91,6 +91,13 @@ namespace BlackEyeFastBake
 		 */
 		bool Resolve(ISequencer& Sequencer, FShot& Shot, FString& OutError)
 		{
+			// The shot open on its own: it is the root, nothing to map.
+			if (Sequencer.GetRootMovieSceneSequence() == Shot.Shot)
+			{
+				Shot.ID = MovieSceneSequenceID::Root;
+				Shot.ShotToRoot = FMovieSceneTimeTransform();
+				return true;
+			}
 			const FMovieSceneSequenceHierarchy* Hierarchy = Sequencer.GetEvaluationTemplate().GetHierarchy();
 			if (!Hierarchy)
 			{
@@ -99,8 +106,19 @@ namespace BlackEyeFastBake
 			}
 			const FMovieSceneSubSequenceData* Found = nullptr;
 			const UMovieSceneSubSection* Section = Shot.Section.Get();
+			// The shot Sequencer is focused on (inside the master) is the instance the user is looking at.
+			if (Sequencer.GetFocusedMovieSceneSequence() == Shot.Shot)
+			{
+				Found = Hierarchy->FindSubData(Sequencer.GetFocusedTemplateID());
+				Shot.ID = Sequencer.GetFocusedTemplateID();
+			}
+			const bool bFocused = Found != nullptr;
 			for (const TPair<FMovieSceneSequenceID, FMovieSceneSubSequenceData>& Pair : Hierarchy->AllSubSequenceData())
 			{
+				if (bFocused)
+				{
+					break;
+				}
 				if (Pair.Value.GetLoadedSequence() == Shot.Shot && (!Found || (Section && Pair.Value.DeterministicSequenceID == Section->GetSequenceID())))
 				{
 					Found = &Pair.Value;
@@ -141,6 +159,8 @@ namespace BlackEyeFastBake
 				FBlackEyeFastBakeOptions Options = Settings.Options;
 				Options.CameraBindingName = Plans[Plan].CameraBindingName;
 				Options.Ranges = Plans[Plan].Ranges;
+				Options.TwinBinding = Plans[Plan].TwinBinding;
+				Options.bCreateNewTwin = Plans[Plan].bCreateNewTwin;
 				Options.ProgressNote = FString::Printf(TEXT(" (%d of %d)"), Plan + 1, Plans.Num());
 				return Options;
 			}
@@ -206,7 +226,9 @@ namespace BlackEyeFastBake
 			const FShot& Shot = Run->Shots[ShotIndex];
 			UMovieSceneSubSection* Section = Shot.Section.Get();
 			const bool bAny = Shot.Plans.ContainsByPredicate([&Run](int32 i) { return Run->Baked[i]; });
-			if (!bAny || !Section)
+			// Already looking at the shot (open on its own, or focused inside the master): write where it is.
+			const bool bInShot = Sequencer.GetFocusedMovieSceneSequence() == Shot.Shot;
+			if (!bAny || (!Section && !bInShot))
 			{
 				for (int32 i : Shot.Plans)
 				{
@@ -218,9 +240,12 @@ namespace BlackEyeFastBake
 				RunNextTick([Run, ShotIndex]() { WriteInside(Run, ShotIndex + 1); });
 				return;
 			}
-			Sequencer.FocusSequenceInstance(*Section);
+			if (!bInShot)
+			{
+				Sequencer.FocusSequenceInstance(*Section);
+			}
 			// Focus changes what Sequencer shows; edit on the next tick, as after opening (BlackEyeFastBakeMenu.cpp).
-			RunNextTick([Run, ShotIndex]()
+			RunNextTick([Run, ShotIndex, bInShot]()
 			{
 				ISequencer& Sequencer = *Run->Sequencer;
 				SetOverride(Sequencer, Sequencer.GetFocusedTemplateID());
@@ -242,7 +267,10 @@ namespace BlackEyeFastBake
 						Run->Fail(i, Report.Message);
 					}
 				}
-				Sequencer.PopToSequenceInstance(Run->Focus);
+				if (!bInShot)
+				{
+					Sequencer.PopToSequenceInstance(Run->Focus);
+				}
 				SetOverride(Sequencer, SequencerOverride(Sequencer));
 				RunNextTick([Run, ShotIndex]() { WriteInside(Run, ShotIndex + 1); });
 			});

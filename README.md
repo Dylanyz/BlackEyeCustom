@@ -45,6 +45,9 @@ Three places give the whole picture:
     or keys and camera setup; keep or replace frames baked before.
   - **Afterwards the shots play** the bake everywhere, the bake only on the frames baked (the camera cut is split
     there; the rest stays live Black Eye), or the live camera.
+  - **This shot** (when one shot section is selected, or a shot is open with nothing selected): pick its Black Eye
+    camera (the one on the camera cut by default) and its bake camera, or **Create new +** for another one beside it;
+    **Lock** / **Unlock** act at once, for just the selected section or the whole shot.
 
   Console: `BlackEyeCustom.FastBake.BakeEdit [handles] [warmup] [keep 0|1] [lock 0|1|2] [selected 0|1] [mode 0|1|2]
   [direct 0|1] [setup 0|1]`, `BlackEyeCustom.FastBake.EditPlan [handles] [selected 0|1] [mode 0|1|2]`.

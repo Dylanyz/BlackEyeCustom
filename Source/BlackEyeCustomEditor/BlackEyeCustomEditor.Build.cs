@@ -27,6 +27,7 @@ public class BlackEyeCustomEditor : ModuleRules
 				"CinematicCamera",
 				"Constraints",
 				"ContentBrowser",
+				"InputCore",
 				"LevelSequence",
 				"LevelSequenceEditor",
 				"MovieScene",

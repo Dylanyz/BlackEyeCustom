@@ -167,7 +167,7 @@ namespace BlackEyeFastBake
 			FGuid Candidate = Cut ? Cut->GetCameraBindingID().GetGuid() : FGuid();
 			for (const FTwin& Twin : Twins)
 			{
-				if (Twin.Twin == Candidate || Twin.Stale.Contains(Candidate))
+				if (Twin.Alive.Contains(Candidate) || Twin.Stale.Contains(Candidate))
 				{
 					Candidate = Twin.Camera;
 				}

@@ -225,7 +225,9 @@ needs no symbol because `Tick` is virtual on `AActor`. Every name used is checke
       nothing;
     - a bake with no camera named, on a locked shot, didn't recognise the twin in the cut and fell back to the first
       Black Eye camera bound: the shot's unused spare (no subjects, focal 12 mm).
-    Fix (built 2026-10-06, `FindTwins`): the twin is the newest tagged ID whose binding exists, the rest are stale. A
+    Fix (built 2026-10-06, `FindTwins`): the twin is the newest tagged ID whose binding exists, the rest are stale.
+    **Changed 2026-10-07:** only removed IDs are stale; older live ones are the camera's other bake cameras (§6, shot
+    controls). The fix's retag left one live ID per camera, so shots baked before carry none. A
     bake retags so the tag names only its twin and moves cuts off stale twins; lock and unlock move cuts on stale twins
     too; with no camera named, a cut on a twin maps back to its Black Eye camera (bake and realtime record alike).
 18. **Measured: the frame counter must advance every step (trap 4.7, confirmed and fixed).** The whole bake runs inside
@@ -410,6 +412,15 @@ Not built yet: re-sync settings without re-baking (P2); keeping the previous bak
     are split at each baked span (`UMovieSceneSection::SplitSection`) and the pieces inside point at the twin; the rest
     stay live, in every edit using the shot. Pieces locked by earlier bakes stay locked; unlock repoints them all, the
     split points stay (they change nothing).
+  - **Shot controls** (*built 2026-10-07, not yet run*): when the window is about one shot (a single selected shot
+    section, or a shot Sequencer has open with nothing selected), it lists that shot's Black Eye cameras (the one on a
+    camera cut first) and each one's bake cameras, plus "Create new +", and has Lock / Unlock buttons that act at once,
+    for the selected section's frames (the cut is split there) or the whole shot. Baking that shot then uses the
+    chosen camera and bake camera (`FBlackEyeFastBakeOptions::TwinBinding`, `bCreateNewTwin`). The list is read from
+    the shot's data only (binding classes, cuts, twin tags), nothing spawned or evaluated, so it is made as the window
+    opens; the time is logged and shown. **A camera can now have several bake cameras:** `FindTwins` keeps every live
+    tagged twin (`Alive`), stale means removed only (trap 4.17 changed), a bake writes the chosen one, else the one its
+    cuts play, else the newest, and a new one is named `<camera>_Bake2`, 3...
   - Not yet measured: that a master bake matches a shot-by-shot bake on the frames both bake; that direct twins spawn,
     key and undo like Sequencer-made ones; the first editor frame after a master bake (writing twins changes the shots,
     which Sequencer recompiles on its next tick, `Sequencer.cpp:1118-1126`; hypothesis: per shot, not the master's

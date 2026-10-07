@@ -18,16 +18,44 @@ class UMovieSceneSubSection;
 
 namespace BlackEyeFastBake
 {
-	/** A Black Eye camera and its baked twin, from the binding tag the twin writer leaves (BlackEyeFastBakeTwin.cpp). */
+	/**
+	 * A Black Eye camera and its bake cameras (twins), from the binding tag the twin writer leaves
+	 * (BlackEyeFastBakeTwin.cpp). A camera can have several: the Bake Edit window's "Create new".
+	 */
 	struct FTwin
 	{
 		FGuid Camera;
-		FGuid Twin;          // the newest tagged twin whose binding exists; invalid when none does
-		TArray<FGuid> Stale; // every other tagged twin: removed, or older. Camera cuts may still point at them
+		FGuid Twin;          // the newest twin whose binding exists; invalid when none does
+		TArray<FGuid> Alive; // every twin whose binding exists, oldest first (Twin is the last)
+		TArray<FGuid> Stale; // tagged twins whose binding is gone. Camera cuts may still point at them
 	};
 
 	/** Every baked camera in the sequence. */
 	TArray<FTwin> FindTwins(const UMovieScene& MovieScene);
+
+	/** The twin one of the camera's cuts plays, else the newest. */
+	FGuid DefaultTwin(const UMovieScene& MovieScene, const FTwin& Twins);
+
+	/**
+	 * Points a shot's camera cuts for one Black Eye camera. Lock: cuts on the camera or its other twins play Twin. Unlock:
+	 * cuts on any of its twins play the camera. Span (shot ticks) limits it, splitting cuts at its edges; All() is the
+	 * whole shot. One undo step. Returns the cut sections changed (BlackEyeFastBakeTwin.cpp).
+	 */
+	int32 SetShotCameraLock(ULevelSequence* Shot, const FGuid& Camera, const FGuid& Twin, bool bLock, const TRange<FFrameNumber>& Span);
+
+	/** What a shot's cuts for one camera play within Span: "live Black Eye", a twin's name, or "mixed". */
+	FString DescribeCutPlay(const UMovieScene& MovieScene, const FGuid& Camera, const TRange<FFrameNumber>& Span);
+
+	/** A Black Eye camera bound in a shot, for the Bake Edit window's shot controls (BlackEyeFastBakeEdit.cpp). */
+	struct FShotCamera
+	{
+		FGuid Camera;
+		FString Name;
+		bool bOnCut = false;      // one of the shot's camera cuts plays it (or its twin)
+		TArray<FGuid> Twins;      // its bake cameras, oldest first
+		FGuid DefaultTwin;        // the one its cuts play, else the newest; invalid: none yet
+	};
+	TArray<FShotCamera> ListShotCameras(ULevelSequence* Shot);
 
 	/** One baked frame: what the Black Eye camera solved, plus its subjects for checking. */
 	struct FSample
