@@ -15,7 +15,7 @@ reproduced here; the files cited ship with each product's source.
 | [3. The algorithm](#3-the-algorithm) | built |
 | [4. Traps](#4-traps) | 4.11-4.18 measured; 4.1 and 4.4 confirmed; the rest from source and review |
 | [5. Output: the baked twin, lock and unlock](#5-output-the-baked-twin-lock-and-unlock) | built, measured on a production edit |
-| [6. Entry points](#6-entry-points) | library, Sequencer menu and Bake Edit built (Bake Edit measured on the repro 2026-10-07); Bake Edit from the master built 2026-10-07, not yet run; folder batch is P2 |
+| [6. Entry points](#6-entry-points) | library, Sequencer menu and Bake Edit built (Bake Edit measured on the repro 2026-10-07); Bake Edit from the master, shot controls and the one window built and measured on the repro 2026-10-07; folder batch is P2 |
 | [7. What becomes trivial inside Black Eye](#7-what-becomes-trivial-inside-black-eye) | planned |
 | [8. Measured numbers](#8-measured-numbers) | measured on the repro and on a production angle (P0); speed audit 2026-10-06 |
 | [9. Decisions and rejected ideas](#9-decisions-and-rejected-ideas) | live |
@@ -378,7 +378,7 @@ Not built yet: re-sync settings without re-baking (P2); keeping the previous bak
     editor frame after the open (33M `LoadObject` calls), and grows with the takes nested under the master
     (sections on deactivated rows count). Any path that reopens the master, or makes a shot the root and comes back,
     pays it.
-- **Bake Edit from the master** (*built 2026-10-07, not yet run*; `Private/FastBake/BlackEyeFastBakeMaster.cpp`). The
+- **Bake Edit from the master** (*built and measured on the repro 2026-10-07*; `Private/FastBake/BlackEyeFastBakeMaster.cpp`). The
   dialog's default; shot by shot stays as it was. The edit stays Sequencer's root and nothing is opened.
   - **Each shot is evaluated alone inside the master** through the root instance's
     `FSequenceInstance::OverrideRootSequence(ShotID)` (`MovieSceneSequenceInstance.h:329`): the mechanism behind
@@ -417,7 +417,7 @@ Not built yet: re-sync settings without re-baking (P2); keeping the previous bak
     are split at each baked span (`UMovieSceneSection::SplitSection`) and the pieces inside point at the twin; the rest
     stay live, in every edit using the shot. Pieces locked by earlier bakes stay locked; unlock repoints them all, the
     split points stay (they change nothing).
-  - **Shot controls** (*built 2026-10-07, not yet run*): when the window is about one shot (a single selected shot
+  - **Shot controls** (*built and measured on the repro 2026-10-07*): when the window is about one shot (a single selected shot
     section, or a shot Sequencer has open with nothing selected), it lists that shot's Black Eye cameras (the one on a
     camera cut first) and each one's bake cameras, plus "Create new +", and has Lock / Unlock buttons that act at once,
     for the selected section's frames (the cut is split there) or the whole shot. Baking that shot then uses the
@@ -426,16 +426,33 @@ Not built yet: re-sync settings without re-baking (P2); keeping the previous bak
     opens; the time is logged and shown. **A camera can now have several bake cameras:** `FindTwins` keeps every live
     tagged twin (`Alive`), stale means removed only (trap 4.17 changed), a bake writes the chosen one, else the one its
     cuts play, else the newest, and a new one is named `<camera>_Bake2`, 3...
-  - **One window for every way in** (*built 2026-10-07, not yet run*): the Sequencer toolbar on any sequence, a
+  - **One window for every way in** (*built 2026-10-07; seen on the repro except the Content Browser entry*): the Sequencer toolbar on any sequence, a
     camera's right-click Bake..., and the Content Browser on one or **several** sequences. Several: each edit is planned
     where it shows each shot, each shot at its full extent (every Black Eye camera on its cuts, where they play), plans
     for the same shot camera merged; they bake shot by shot (from the master needs one open edit), with Like a render /
     With handles still choosing how each cut starts. A sequence with a Cinematic Shot track is an edit, and gets shot
     controls only through a selected section or a camera's menu.
-  - Not yet measured: that a master bake matches a shot-by-shot bake on the frames both bake; that direct twins spawn,
-    key and undo like Sequencer-made ones; the first editor frame after a master bake (writing twins changes the shots,
-    which Sequencer recompiles on its next tick, `Sequencer.cpp:1118-1126`; hypothesis: per shot, not the master's
-    minutes).
+  - **Measured on the repro (2026-10-07, tester project, `Tools/fast_bake_edit_repro.py`):**
+    - Plans: Like a render [30,90) + [200,240) at 10 frames after (the overlapping uses [30,70) and [60,80) merge, the
+      tail stops at 90); With handles and shot by shot [20,90) + [190,240), as before.
+    - A master bake (With handles, written directly) equals the shot-by-shot bake of the same ranges to 0.0001 deg and
+      0.0000 cm on all 120 keys, at 0.12 ms/frame with nothing opened (shot by shot: 0.33 ms/frame plus two opens).
+    - Like a render starts settled at each cut: x -191.5 cm at frame 30 against -202.9 arriving with handles, the two
+      equal by frame 60; again at 200, equal by 230. Lock only the baked frames split the cut into exactly [0,30) live,
+      [30,90) bake, [90,200) live, [200,240) bake, [240,300) live, and kept the handle keys of earlier bakes outside.
+    - One undo restored keys and cuts. A new twin written directly got its spawn track, transform keys, a
+      CameraComponent child that resolves to the spawned twin's component, and played on its keys (217.13 cm at
+      frame 100). Keys and setup respawned it. The inside-each-shot writer under the master matched to 0.0000 and left
+      Sequencer on the edit.
+    - Window: shot controls listed in 0.04-0.07 ms; Unlock "only this section" split the cut; Create new + greyed Lock
+      and baked into `BEC_A_Bake2` on the section's frames only; the camera menu's Bake... inside the master baked the
+      whole shot without reopening anything and kept the focus.
+    - **Bug found and fixed:** a cut split by a partial lock counted as separate cuts, so handles stopped at the seams
+      and Like a render re-settled there. `CutCameras` now merges touching cuts of one camera; re-measured: the
+      section plan reaches its 24 extra frames ([200,254)).
+    - Not measured: the Content Browser entry (synthetic right-clicks don't open its menu); the first editor frame
+      after a master bake on a production master (writing twins changes the shots, which Sequencer recompiles on its
+      next tick, `Sequencer.cpp:1118-1126`; hypothesis: per shot, not the master's minutes).
 - **Content Browser batch over a folder** (P2): right-click shot Level Sequence(s) ▸ Bake Black Eye cameras, whole
   shots, all angles at once.
 - **`UBlackEyeFastBakeLibrary`** (built; BlueprintCallable, so Python and agents can drive it): `BakeShot(LS, Options)`,
@@ -598,7 +615,7 @@ Control Rig, ~0.15 s).
 - **P2 batch and UX:** Content Browser batch over a shots folder; bake info (date, range, BEC parameter hash); a stale
   flag when BEC tracks or subject sections change (reusing AutoBake's track-signature idea); re-sync settings.
 - **Bake an edit:** *built 2026-10-07* (§6): the ranges each shot is cut into, plus handles and warm-up.
-- **Bake an edit from the master:** *built 2026-10-07, not yet run* (§6): no reopening, render-like cuts or handles,
+- **Bake an edit from the master:** *built and measured on the repro 2026-10-07* (§6): no reopening, render-like cuts or handles,
   twins written as data, lock only the baked frames.
 - **P3 speed** (only if needed): the shared subject cache across angles; AutoBake re-bake on change.
 

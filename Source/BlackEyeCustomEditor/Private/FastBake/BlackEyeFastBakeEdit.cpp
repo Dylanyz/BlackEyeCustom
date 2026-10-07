@@ -157,7 +157,27 @@ namespace BlackEyeFastBake
 					Out.Add({ Camera, Cut->GetRange() });
 				}
 			}
-			return Out;
+			// Touching cuts of one camera are one cut: locking or unlocking part of a shot splits its cut into pieces
+			// (live, bake, live), and handles and render-like starts must not stop at those seams (measured 2026-10-07).
+			Out.Sort([](const FCutCamera& A, const FCutCamera& B)
+			{
+				return !A.Range.HasLowerBound() || (B.Range.HasLowerBound() && A.Range.GetLowerBoundValue() < B.Range.GetLowerBoundValue());
+			});
+			TArray<FCutCamera> Merged;
+			for (const FCutCamera& Cut : Out)
+			{
+				FCutCamera* Last = Merged.Num() ? &Merged.Last() : nullptr;
+				if (Last && Last->Camera == Cut.Camera && Last->Range.HasUpperBound() && Cut.Range.HasLowerBound()
+					&& Cut.Range.GetLowerBoundValue() <= Last->Range.GetUpperBoundValue())
+				{
+					Last->Range = TRange<FFrameNumber>::Hull(Last->Range, Cut.Range);
+				}
+				else
+				{
+					Merged.Add(Cut);
+				}
+			}
+			return Merged;
 		}
 
 		/** One cinematic shot section's view of a camera: shot ticks, inside one camera cut. */
@@ -1217,8 +1237,8 @@ namespace BlackEyeFastBake
 							+ SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 8)
 							[
 								SNew(STextBlock).AutoWrapText(true)
-								.Text(LOCTEXT("DialogIntro", "Records every Black Eye camera this edit shows into a plain \"twin\" camera, "
-								                             "so the edit plays the same way every time."))
+								.Text(LOCTEXT("DialogIntro", "Records Black Eye cameras into plain \"twin\" (bake) cameras, so they play the "
+								                             "same way every time."))
 							]
 							+ SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 8)
 							[
