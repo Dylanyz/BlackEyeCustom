@@ -30,9 +30,11 @@ Three places give the whole picture:
 
 ## Using Fast Bake
 
-- **In Sequencer:** open a shot, right-click the Black Eye camera's binding > **Black Eye Fast Bake** > **Bake and
-  lock**. It bakes the whole playback range into `<camera>_Bake` and makes the shot's camera cuts play it. The same
-  menu then offers **Unlock** (play the live camera) and **Lock**. Every action is one undo step.
+- **One window, many ways in:** right-click a Black Eye camera's binding > **Black Eye Fast Bake** > **Bake...** (that
+  camera picked, lock on); **Bake Edit** on the Sequencer toolbar of any sequence; or right-click one or several Level
+  Sequences in the Content Browser > **Black Eye: Bake...** (edits where they show each shot, shots at full length).
+  A bake writes `<camera>_Bake` (or a new `_Bake2`...) and can make the shot's camera cuts play it. Every action is one
+  undo step.
 - **Bake an edit:** open an edit (a sequence cutting between shots on a Cinematic Shot track) and click **Bake Edit**
   on the Sequencer toolbar, or right-click the edit in the Content Browser > **Black Eye: Bake Edit...**. Every Black
   Eye camera the edit shows is baked on only the frames the edit uses, one twin per camera. **Select shot sections

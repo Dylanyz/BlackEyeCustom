@@ -311,6 +311,11 @@ Not built yet: re-sync settings without re-baking (P2); keeping the previous bak
 
 - **Sequencer binding right-click** (built): Black Eye Fast Bake ▸ Bake and lock / Re-bake and lock, Lock / Unlock,
   with the bake info in the tooltips and a toast with the result (`BlackEyeFastBakeMenu.cpp`).
+  **Changed 2026-10-07 (Dylan: "it's all one panel and it's all one system and it's easier to update"):** the submenu
+  is one entry, **Bake...**, which opens the Bake window (below) with that camera picked in its shot controls and lock
+  on; bake camera, lock / unlock and how to bake all live there. In a shot shown inside an edit it bakes from the
+  master (no reopening) unless the window says shot by shot. `BlackEyeCustom.FastBake.Bake <binding>` runs that
+  window's Bake with its last settings. The two crash notes below are about the old entries.
   **Measured crash (2026-10-06), fixed:** building the submenu called `OpenEditorForAsset` to find the binding. With a
   shot focused inside an edit, that opened the shot as a new root, destroying the Sequencer that owned the open menu,
   and Slate asserted (`SharedPointer.h` `IsValid()` from `MenuStack.cpp`). Now building a menu has no side effects (it
@@ -421,6 +426,12 @@ Not built yet: re-sync settings without re-baking (P2); keeping the previous bak
     opens; the time is logged and shown. **A camera can now have several bake cameras:** `FindTwins` keeps every live
     tagged twin (`Alive`), stale means removed only (trap 4.17 changed), a bake writes the chosen one, else the one its
     cuts play, else the newest, and a new one is named `<camera>_Bake2`, 3...
+  - **One window for every way in** (*built 2026-10-07, not yet run*): the Sequencer toolbar on any sequence, a
+    camera's right-click Bake..., and the Content Browser on one or **several** sequences. Several: each edit is planned
+    where it shows each shot, each shot at its full extent (every Black Eye camera on its cuts, where they play), plans
+    for the same shot camera merged; they bake shot by shot (from the master needs one open edit), with Like a render /
+    With handles still choosing how each cut starts. A sequence with a Cinematic Shot track is an edit, and gets shot
+    controls only through a selected section or a camera's menu.
   - Not yet measured: that a master bake matches a shot-by-shot bake on the frames both bake; that direct twins spawn,
     key and undo like Sequencer-made ones; the first editor frame after a master bake (writing twins changes the shots,
     which Sequencer recompiles on its next tick, `Sequencer.cpp:1118-1126`; hypothesis: per shot, not the master's

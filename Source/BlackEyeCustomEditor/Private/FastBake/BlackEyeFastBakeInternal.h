@@ -165,6 +165,12 @@ namespace BlackEyeFastBake
 	void RegisterEditMenus();
 	void UnregisterEditMenus();
 
+	/**
+	 * The Bake window for one camera of the sequence Sequencer has focused (its right-click menu): that camera picked,
+	 * lock on. bNoDialog runs the window's Bake with its last settings instead (the console command).
+	 */
+	void OpenBakeForCamera(TSharedPtr<ISequencer> Sequencer, const FString& CameraName, bool bNoDialog);
+
 	/** Shared with BlackEyeFastBakeEdit.cpp (BlackEyeFastBakeMenu.cpp). */
 	void Notify(const FText& Text, bool bSuccess);
 	void RunNextTick(TFunction<void()> Action);
