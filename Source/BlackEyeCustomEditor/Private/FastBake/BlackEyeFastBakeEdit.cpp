@@ -139,9 +139,11 @@ namespace BlackEyeFastBake
 		/**
 		 * Walks an edit's Cinematic Shot tracks. A sequence whose camera cuts play a Black Eye camera is a shot; any
 		 * other is a nested edit, walked in turn. Sub tracks are never followed: inside a shot they hold its scene.
-		 * Window is the part of Sequence that is seen, in its ticks.
+		 * Window is the part of Sequence that is seen, in its ticks. Only, when not empty, limits the top level to those
+		 * sections (Bake Edit on a selection).
 		 */
-		void Collect(ULevelSequence* Sequence, const TRange<FFrameNumber>& Window, int32 Depth, TArray<ULevelSequence*>& Path, TArray<FUse>& Out)
+		void Collect(ULevelSequence* Sequence, const TRange<FFrameNumber>& Window, int32 Depth, TArray<ULevelSequence*>& Path, TArray<FUse>& Out,
+		             TConstArrayView<const UMovieSceneSubSection*> Only = {})
 		{
 			for (const UMovieSceneTrack* Track : Sequence->GetMovieScene()->GetTracks())
 			{
@@ -154,7 +156,7 @@ namespace BlackEyeFastBake
 				{
 					const UMovieSceneSubSection* Sub = Cast<UMovieSceneSubSection>(Section);
 					ULevelSequence* Inner = Sub ? Cast<ULevelSequence>(Sub->GetSequence()) : nullptr;
-					if (!Inner || !Sub->IsActive() || Shots->IsRowEvalDisabled(Sub->GetRowIndex()))
+					if (!Inner || !Sub->IsActive() || Shots->IsRowEvalDisabled(Sub->GetRowIndex()) || (Only.Num() && !Only.Contains(Sub)))
 					{
 						continue;
 					}
@@ -193,7 +195,7 @@ namespace BlackEyeFastBake
 		}
 	}
 
-	TArray<FBlackEyeShotBakePlan> GetEditBakePlan(ULevelSequence* EditSequence, int32 HandleFrames)
+	TArray<FBlackEyeShotBakePlan> GetEditBakePlan(ULevelSequence* EditSequence, int32 HandleFrames, TConstArrayView<const UMovieSceneSubSection*> Only)
 	{
 		using namespace Edit;
 		TArray<FBlackEyeShotBakePlan> Plans;
@@ -203,7 +205,8 @@ namespace BlackEyeFastBake
 		}
 		TArray<FUse> Uses;
 		TArray<ULevelSequence*> Path{ EditSequence };
-		Collect(EditSequence, EditSequence->GetMovieScene()->GetPlaybackRange(), 0, Path, Uses);
+		// A whole edit is seen within its playback range; a section picked by hand is baked whole, even past it.
+		Collect(EditSequence, Only.Num() ? TRange<FFrameNumber>::All() : EditSequence->GetMovieScene()->GetPlaybackRange(), 0, Path, Uses, Only);
 
 		for (const FUse& Use : Uses)
 		{
@@ -272,11 +275,75 @@ namespace BlackEyeFastBake
 			return (Sequencer && Sequencer->GetRootMovieSceneSequence() == Sequence) ? Sequencer : nullptr;
 		}
 
+		/**
+		 * What one Bake Edit covers: the whole edit, or the sections selected in it. Every entry point builds one and
+		 * hands it to the same dialog and batch, so the two ways in never drift apart.
+		 */
+		struct FBakeScope
+		{
+			TWeakObjectPtr<ULevelSequence> Edit;                    // the sequence holding the Cinematic Shot track
+			TArray<TWeakObjectPtr<UMovieSceneSubSection>> Selected; // its selected shot sections, maybe none
+			TWeakObjectPtr<ULevelSequence> ReturnTo;                // the Sequencer's root when started, reopened at the end
+			bool bSelectedOnly = false;
+
+			TArray<FBlackEyeShotBakePlan> Plan(int32 HandleFrames) const
+			{
+				TArray<const UMovieSceneSubSection*> Only;
+				for (const TWeakObjectPtr<UMovieSceneSubSection>& Section : Selected)
+				{
+					if (bSelectedOnly && Section.IsValid())
+					{
+						Only.Add(Section.Get());
+					}
+				}
+				if (bSelectedOnly && Only.Num() == 0)
+				{
+					return {}; // every selected section is gone
+				}
+				return GetEditBakePlan(Edit.Get(), HandleFrames, Only);
+			}
+
+			FString Describe() const
+			{
+				const FString Name = Edit.IsValid() ? Edit->GetName() : FString();
+				return bSelectedOnly ? FString::Printf(TEXT("%d selected section(s) of %s"), Selected.Num(), *Name) : Name;
+			}
+		};
+
+		/** The shot sections selected in a Sequencer's focused sequence. */
+		TArray<TWeakObjectPtr<UMovieSceneSubSection>> SelectedShotSections(ISequencer& Sequencer)
+		{
+			TArray<TWeakObjectPtr<UMovieSceneSubSection>> Out;
+			const UMovieSceneSequence* Focused = Sequencer.GetFocusedMovieSceneSequence();
+			TArray<UMovieSceneSection*> Selected;
+			Sequencer.GetSelectedSections(Selected);
+			for (UMovieSceneSection* Section : Selected)
+			{
+				UMovieSceneSubSection* Sub = Cast<UMovieSceneSubSection>(Section);
+				if (Sub && Sub->GetTypedOuter<UMovieSceneCinematicShotTrack>() && Focused && Sub->GetTypedOuter<UMovieScene>() == Focused->GetMovieScene())
+				{
+					Out.Add(Sub);
+				}
+			}
+			return Out;
+		}
+
+		/** A Sequencer's scope: its focused sequence and selection; it returns to its root. */
+		FBakeScope ScopeOf(ISequencer& Sequencer)
+		{
+			FBakeScope Scope;
+			Scope.Edit = Cast<ULevelSequence>(Sequencer.GetFocusedMovieSceneSequence());
+			Scope.ReturnTo = Cast<ULevelSequence>(Sequencer.GetRootMovieSceneSequence());
+			Scope.Selected = SelectedShotSections(Sequencer);
+			Scope.bSelectedOnly = Scope.Selected.Num() > 0;
+			return Scope;
+		}
+
 		/** A batch in flight: one shot camera at a time, each opened alone first (BakeShot needs it as root). */
 		struct FBatch
 		{
-			TWeakObjectPtr<ULevelSequence> EditSequence;
-			TOptional<FQualifiedFrameTime> EditTime; // the edit's playhead, put back at the end
+			FBakeScope Scope;
+			TOptional<FQualifiedFrameTime> EditTime; // the root's playhead, put back at the end
 			TArray<FBlackEyeShotBakePlan> Plans;
 			FEditBakeSettings Settings;
 			int32 Next = 0;
@@ -290,23 +357,23 @@ namespace BlackEyeFastBake
 		void Finish(const TSharedRef<FBatch>& Batch)
 		{
 			const FText Summary = FText::Format(
-				LOCTEXT("EditDone", "Bake Edit {0}: {1} of {2} camera(s) baked, {3} frames keyed, {4}s{5}{6}"),
-				FText::FromString(Batch->EditSequence.IsValid() ? Batch->EditSequence->GetName() : FString()),
+				LOCTEXT("EditDone", "Bake Edit, {0}: {1} of {2} camera(s) baked, {3} frames keyed, {4}s{5}{6}"),
+				FText::FromString(Batch->Scope.Describe()),
 				Batch->Baked, Batch->Plans.Num(), Batch->KeyedFrames, FText::AsNumber(FMath::RoundToInt(Batch->Seconds)),
 				Batch->bCancelled ? LOCTEXT("Cancelled", ". Cancelled") : FText(),
 				Batch->Failures.Num() ? FText::FromString(TEXT(". Failed: ") + FString::Join(Batch->Failures, TEXT("; "))) : FText());
 			UE_LOG(LogBlackEyeCustom, Display, TEXT("[BlackEyeCustom] %s"), *Summary.ToString());
 			const bool bOk = Batch->Failures.Num() == 0 && !Batch->bCancelled;
-			ULevelSequence* EditSequence = Batch->EditSequence.Get();
-			if (!EditSequence)
+			ULevelSequence* ReturnTo = Batch->Scope.ReturnTo.Get();
+			if (!ReturnTo)
 			{
 				Notify(Summary, bOk);
 				return;
 			}
-			// Back to the edit, at the frame the user left it.
-			OpenThen(EditSequence, [Batch, Summary, bOk]()
+			// Back to where the user was, at the frame they left.
+			OpenThen(ReturnTo, [Batch, Summary, bOk]()
 			{
-				if (TSharedPtr<ISequencer> Sequencer = FindRootSequencer(Batch->EditSequence.Get()))
+				if (TSharedPtr<ISequencer> Sequencer = FindRootSequencer(Batch->Scope.ReturnTo.Get()))
 				{
 					if (Batch->EditTime.IsSet())
 					{
@@ -362,46 +429,52 @@ namespace BlackEyeFastBake
 			});
 		}
 
-		void StartBatch(ULevelSequence* EditSequence, const FEditBakeSettings& Settings)
+		void StartBatch(const FBakeScope& Scope, const FEditBakeSettings& Settings)
 		{
 			TSharedRef<FBatch> Batch = MakeShared<FBatch>();
-			Batch->EditSequence = EditSequence;
+			Batch->Scope = Scope;
+			if (!Batch->Scope.ReturnTo.IsValid())
+			{
+				Batch->Scope.ReturnTo = Scope.Edit;
+			}
 			Batch->Settings = Settings;
-			Batch->Plans = GetEditBakePlan(EditSequence, Settings.HandleFrames);
-			if (TSharedPtr<ISequencer> Sequencer = FindRootSequencer(EditSequence))
+			Batch->Plans = Scope.Plan(Settings.HandleFrames);
+			if (TSharedPtr<ISequencer> Sequencer = FindRootSequencer(Batch->Scope.ReturnTo.Get()))
 			{
 				Batch->EditTime = Sequencer->GetGlobalTime();
 			}
 			if (Batch->Plans.Num() == 0)
 			{
-				Notify(FText::Format(LOCTEXT("NothingToBake", "{0} shows no shot with a Black Eye camera on its camera cuts"),
-				                     FText::FromString(EditSequence->GetName())), false);
+				Notify(FText::Format(LOCTEXT("NothingToBake", "{0}: no shot with a Black Eye camera on its camera cuts"),
+				                     FText::FromString(Scope.Describe())), false);
 				return;
 			}
 			RunNextTick([Batch]() { BakeNext(Batch); });
 		}
 
 		/** The dialog: handles, warm-up, keep, lock, and what that would bake. Starts the batch on Bake. */
-		void OpenDialog(ULevelSequence* EditSequence)
+		void OpenDialog(const FBakeScope& InScope)
 		{
+			ULevelSequence* EditSequence = InScope.Edit.Get();
 			if (!EditSequence)
 			{
 				return;
 			}
 			TSharedRef<FEditBakeSettings> Settings = MakeShared<FEditBakeSettings>();
 			Settings->Load();
-			const TWeakObjectPtr<ULevelSequence> WeakEdit(EditSequence);
+			TSharedRef<FBakeScope> Scope = MakeShared<FBakeScope>(InScope);
 			bool bBake = false;
 
-			// The summary follows the handles; the plan is re-made only when they change.
-			struct FPlanCache { int32 Handles = INDEX_NONE; TArray<FBlackEyeShotBakePlan> Plans; };
+			// The summary follows the settings; the plan is re-made only when handles or scope change.
+			struct FPlanCache { int32 Handles = INDEX_NONE; bool bSelectedOnly = false; TArray<FBlackEyeShotBakePlan> Plans; };
 			TSharedRef<FPlanCache> Cache = MakeShared<FPlanCache>();
-			auto CurrentPlans = [WeakEdit, Settings, Cache]() -> const TArray<FBlackEyeShotBakePlan>&
+			auto CurrentPlans = [Scope, Settings, Cache]() -> const TArray<FBlackEyeShotBakePlan>&
 			{
-				if (Cache->Handles != Settings->HandleFrames)
+				if (Cache->Handles != Settings->HandleFrames || Cache->bSelectedOnly != Scope->bSelectedOnly)
 				{
 					Cache->Handles = Settings->HandleFrames;
-					Cache->Plans = GetEditBakePlan(WeakEdit.Get(), Settings->HandleFrames);
+					Cache->bSelectedOnly = Scope->bSelectedOnly;
+					Cache->Plans = Scope->Plan(Settings->HandleFrames);
 				}
 				return Cache->Plans;
 			};
@@ -410,7 +483,7 @@ namespace BlackEyeFastBake
 				const TArray<FBlackEyeShotBakePlan>& Plans = CurrentPlans();
 				if (Plans.Num() == 0)
 				{
-					return LOCTEXT("NoShots", "No shot in this edit plays a Black Eye camera on its camera cuts.\n"
+					return LOCTEXT("NoShots", "Nothing here plays a Black Eye camera on its camera cuts.\n"
 					                          "An edit is a sequence with a Cinematic Shot track; open the edit, not a shot.");
 				}
 				FString Lines;
@@ -455,6 +528,17 @@ namespace BlackEyeFastBake
 					+ SHorizontalBox::Slot().FillWidth(0.55f)[ Widget ];
 			};
 
+			// Whole edit or selection: two radio buttons, shown only when something is selected.
+			auto ScopeChoice = [Scope](bool bSelected, const FText& Label)
+			{
+				return SNew(SCheckBox)
+					.Style(FAppStyle::Get(), "RadioButton")
+					.IsChecked_Lambda([Scope, bSelected]() { return Scope->bSelectedOnly == bSelected ? ECheckBoxState::Checked : ECheckBoxState::Unchecked; })
+					.OnCheckStateChanged_Lambda([Scope, bSelected](ECheckBoxState) { Scope->bSelectedOnly = bSelected; })
+					[ SNew(STextBlock).Text(Label) ];
+			};
+			const EVisibility ScopeVisibility = Scope->Selected.Num() ? EVisibility::Visible : EVisibility::Collapsed;
+
 			TSharedRef<SWindow> Window = SNew(SWindow)
 				.Title(FText::Format(LOCTEXT("DialogTitle", "Black Eye Fast Bake: {0}"), FText::FromString(EditSequence->GetName())))
 				.ClientSize(FVector2D(620, 480))
@@ -468,9 +552,17 @@ namespace BlackEyeFastBake
 					+ SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 10)
 					[
 						SNew(STextBlock).AutoWrapText(true)
-						.Text(LOCTEXT("DialogIntro", "Bakes every Black Eye camera this edit shows, keyed only on the frames the edit uses "
-						                             "plus handles, onto each camera's twin. Each shot is opened on its own for its bake; "
-						                             "you are put back in the edit at the end."))
+						.Text(LOCTEXT("DialogIntro", "Bakes every Black Eye camera the edit (or the selected sections) shows, keyed only on "
+						                             "the frames used plus handles, onto each camera's twin. Each shot is opened on its own "
+						                             "for its bake; you are put back where you were at the end."))
+					]
+					+ SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 8)
+					[
+						SNew(SHorizontalBox).Visibility(ScopeVisibility)
+						+ SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 16, 0)
+						[ ScopeChoice(true, FText::Format(LOCTEXT("ScopeSelected", "Selected sections ({0})"), Scope->Selected.Num())) ]
+						+ SHorizontalBox::Slot().AutoWidth()
+						[ ScopeChoice(false, LOCTEXT("ScopeWhole", "Whole edit")) ]
 					]
 					+ SVerticalBox::Slot().AutoHeight().Padding(0, 2)
 					[
@@ -531,39 +623,40 @@ namespace BlackEyeFastBake
 				]);
 
 			FSlateApplication::Get().AddModalWindow(Window, FSlateApplication::Get().GetActiveTopLevelWindow());
-			if (bBake && WeakEdit.IsValid())
+			if (bBake && Scope->Edit.IsValid())
 			{
 				Settings->Save();
-				StartBatch(WeakEdit.Get(), *Settings);
+				StartBatch(*Scope, *Settings);
 			}
 		}
 
-		/** The open Sequencer's focused sequence (the console command and agents' way in). */
-		ULevelSequence* FocusedSequence()
+		/** The first open Sequencer's scope: its focused sequence and selection (the console commands' way in). */
+		TOptional<FBakeScope> OpenSequencerScope()
 		{
 			OpenSequencers.RemoveAll([](const TWeakPtr<ISequencer>& S) { return !S.IsValid(); });
 			for (const TWeakPtr<ISequencer>& Weak : OpenSequencers)
 			{
 				const TSharedPtr<ISequencer> Sequencer = Weak.Pin();
-				if (ULevelSequence* Focused = Sequencer ? Cast<ULevelSequence>(Sequencer->GetFocusedMovieSceneSequence()) : nullptr)
+				if (Sequencer && Cast<ULevelSequence>(Sequencer->GetFocusedMovieSceneSequence()))
 				{
-					return Focused;
+					return ScopeOf(*Sequencer);
 				}
 			}
-			return nullptr;
+			return {};
 		}
 
 		/**
-		 * `BlackEyeCustom.FastBake.BakeEdit [handles] [warmup] [keep 0|1] [lock 0|1]`: the dialog's Bake, without the
-		 * dialog, on the focused sequence of the open Sequencer. Omitted arguments use the dialog's last values.
-		 * `BlackEyeCustom.FastBake.EditPlan [handles]` only logs what it would bake.
+		 * `BlackEyeCustom.FastBake.BakeEdit [handles] [warmup] [keep 0|1] [lock 0|1] [selected 0|1]`: the dialog's Bake,
+		 * without the dialog, on the open Sequencer's focused sequence. Omitted arguments use the dialog's last values;
+		 * `selected` defaults to 1 when shot sections are selected, as the dialog does.
+		 * `BlackEyeCustom.FastBake.EditPlan [handles] [selected 0|1]` only logs what it would bake.
 		 */
 		FAutoConsoleCommand GBakeEditCommand(TEXT("BlackEyeCustom.FastBake.BakeEdit"),
-			TEXT("Bake every Black Eye camera the focused edit shows, keyed only where it shows them. Args: [handles] [warmup] [keep 0|1] [lock 0|1]."),
+			TEXT("Bake every Black Eye camera the focused edit (or its selected sections) shows, keyed only where shown. Args: [handles] [warmup] [keep 0|1] [lock 0|1] [selected 0|1]."),
 			FConsoleCommandWithArgsDelegate::CreateStatic([](const TArray<FString>& Args)
 			{
-				ULevelSequence* EditSequence = FocusedSequence();
-				if (!EditSequence)
+				TOptional<FBakeScope> Scope = OpenSequencerScope();
+				if (!Scope)
 				{
 					UE_LOG(LogBlackEyeCustom, Warning, TEXT("[BlackEyeCustom] no open Sequencer to bake an edit from"));
 					return;
@@ -574,20 +667,26 @@ namespace BlackEyeFastBake
 				if (Args.IsValidIndex(1)) { Settings.WarmUpFrames = FCString::Atoi(*Args[1]); }
 				if (Args.IsValidIndex(2)) { Settings.bKeepOtherKeys = FCString::Atoi(*Args[2]) != 0; }
 				if (Args.IsValidIndex(3)) { Settings.bLock = FCString::Atoi(*Args[3]) != 0; }
-				StartBatch(EditSequence, Settings);
+				if (Args.IsValidIndex(4)) { Scope->bSelectedOnly = FCString::Atoi(*Args[4]) != 0 && Scope->Selected.Num() > 0; }
+				StartBatch(*Scope, Settings);
 			}));
 
 		FAutoConsoleCommand GEditPlanCommand(TEXT("BlackEyeCustom.FastBake.EditPlan"),
-			TEXT("Log what Bake Edit would bake for the focused sequence. Arg: [handles]."),
+			TEXT("Log what Bake Edit would bake for the focused sequence (or its selected sections). Args: [handles] [selected 0|1]."),
 			FConsoleCommandWithArgsDelegate::CreateStatic([](const TArray<FString>& Args)
 			{
-				ULevelSequence* EditSequence = FocusedSequence();
+				TOptional<FBakeScope> Scope = OpenSequencerScope();
+				if (!Scope)
+				{
+					UE_LOG(LogBlackEyeCustom, Warning, TEXT("[BlackEyeCustom] no open Sequencer"));
+					return;
+				}
 				FEditBakeSettings Settings;
 				Settings.Load();
 				const int32 Handles = Args.IsValidIndex(0) ? FCString::Atoi(*Args[0]) : Settings.HandleFrames;
-				const TArray<FBlackEyeShotBakePlan> Plans = GetEditBakePlan(EditSequence, Handles);
-				UE_LOG(LogBlackEyeCustom, Display, TEXT("[BlackEyeCustom] edit plan %s, handles %d: %d camera(s)"),
-					EditSequence ? *EditSequence->GetName() : TEXT("(none)"), Handles, Plans.Num());
+				if (Args.IsValidIndex(1)) { Scope->bSelectedOnly = FCString::Atoi(*Args[1]) != 0 && Scope->Selected.Num() > 0; }
+				const TArray<FBlackEyeShotBakePlan> Plans = Scope->Plan(Handles);
+				UE_LOG(LogBlackEyeCustom, Display, TEXT("[BlackEyeCustom] edit plan %s, handles %d: %d camera(s)"), *Scope->Describe(), Handles, Plans.Num());
 				for (const FBlackEyeShotBakePlan& Plan : Plans)
 				{
 					FString Ranges;
@@ -621,14 +720,17 @@ namespace BlackEyeFastBake
 				Section.AddEntry(FToolMenuEntry::InitToolBarButton(TEXT("BlackEyeBakeEdit"),
 					FUIAction(FExecuteAction::CreateLambda([WeakSequencer]()
 					{
-						const TSharedPtr<ISequencer> Sequencer = WeakSequencer.Pin();
-						ULevelSequence* Focused = Sequencer ? Cast<ULevelSequence>(Sequencer->GetFocusedMovieSceneSequence()) : nullptr;
-						const TWeakObjectPtr<ULevelSequence> WeakFocused(Focused);
-						RunNextTick([WeakFocused]() { OpenDialog(WeakFocused.Get()); }); // after the click has finished
+						// The scope is read at click time: the focused sequence and the shot sections selected in it.
+						if (const TSharedPtr<ISequencer> Sequencer = WeakSequencer.Pin())
+						{
+							const FBakeScope Scope = ScopeOf(*Sequencer);
+							RunNextTick([Scope]() { OpenDialog(Scope); }); // after the click has finished
+						}
 					})),
 					LOCTEXT("BakeEditLabel", "Bake Edit"),
 					LOCTEXT("BakeEditTip", "Black Eye Fast Bake: bake every Black Eye camera this edit shows, keyed only where it shows "
-					                       "them, with handles. Opens a window to set the handles first."),
+					                       "them, with handles. With shot sections selected, bakes just those (the window lets you "
+					                       "switch to the whole edit). Opens a window to set the handles first."),
 					FSlateIconFinder::FindIconForClass(ACineCameraActor::StaticClass())));
 			}));
 
@@ -649,7 +751,12 @@ namespace BlackEyeFastBake
 					FSlateIconFinder::FindIconForClass(ACineCameraActor::StaticClass()),
 					FUIAction(FExecuteAction::CreateLambda([Asset]()
 					{
-						RunNextTick([Asset]() { OpenDialog(Cast<ULevelSequence>(Asset.TryLoad())); });
+						RunNextTick([Asset]()
+						{
+							FBakeScope Scope;
+							Scope.Edit = Cast<ULevelSequence>(Asset.TryLoad());
+							OpenDialog(Scope);
+						});
 					})));
 			}));
 		}
@@ -670,6 +777,20 @@ namespace BlackEyeFastBake
 TArray<FBlackEyeShotBakePlan> UBlackEyeFastBakeLibrary::GetEditBakePlan(ULevelSequence* Edit, int32 HandleFrames)
 {
 	return BlackEyeFastBake::GetEditBakePlan(Edit, HandleFrames);
+}
+
+TArray<FBlackEyeShotBakePlan> UBlackEyeFastBakeLibrary::GetSectionsBakePlan(const TArray<UMovieSceneSubSection*>& Sections, int32 HandleFrames)
+{
+	ULevelSequence* Edit = Sections.Num() && Sections[0] ? Sections[0]->GetTypedOuter<ULevelSequence>() : nullptr;
+	TArray<const UMovieSceneSubSection*> Only;
+	for (const UMovieSceneSubSection* Section : Sections)
+	{
+		if (Section && Section->GetTypedOuter<ULevelSequence>() == Edit)
+		{
+			Only.Add(Section);
+		}
+	}
+	return Only.Num() ? BlackEyeFastBake::GetEditBakePlan(Edit, HandleFrames, Only) : TArray<FBlackEyeShotBakePlan>();
 }
 
 #undef LOCTEXT_NAMESPACE

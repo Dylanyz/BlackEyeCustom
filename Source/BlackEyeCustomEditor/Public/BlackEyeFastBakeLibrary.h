@@ -8,6 +8,7 @@
 #include "BlackEyeFastBakeLibrary.generated.h"
 
 class ULevelSequence;
+class UMovieSceneSubSection;
 
 /** A span of display frames, end exclusive. */
 USTRUCT(BlueprintType)
@@ -196,4 +197,8 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Black Eye|Fast Bake")
 	static TArray<FBlackEyeShotBakePlan> GetEditBakePlan(ULevelSequence* Edit, int32 HandleFrames);
+
+	/** GetEditBakePlan for some Cinematic Shot sections of one edit only (those of the first section's edit). */
+	UFUNCTION(BlueprintCallable, Category = "Black Eye|Fast Bake")
+	static TArray<FBlackEyeShotBakePlan> GetSectionsBakePlan(const TArray<UMovieSceneSubSection*>& Sections, int32 HandleFrames);
 };

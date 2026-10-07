@@ -11,6 +11,7 @@
 class ISequencer;
 class ULevelSequence;
 class UMovieScene;
+class UMovieSceneSubSection;
 
 namespace BlackEyeFastBake
 {
@@ -64,8 +65,8 @@ namespace BlackEyeFastBake
 	/** Every baked camera in the sequence. */
 	TArray<FBlackEyeBakeInfo> GetBakeInfo(ULevelSequence* Sequence);
 
-	/** The edit's shots, cameras and used frames plus handles (BlackEyeFastBakeEdit.cpp). */
-	TArray<FBlackEyeShotBakePlan> GetEditBakePlan(ULevelSequence* Edit, int32 HandleFrames);
+	/** The edit's shots, cameras and used frames plus handles; Only limits it to those sections (BlackEyeFastBakeEdit.cpp). */
+	TArray<FBlackEyeShotBakePlan> GetEditBakePlan(ULevelSequence* Edit, int32 HandleFrames, TConstArrayView<const UMovieSceneSubSection*> Only = {});
 
 	/** The Black Eye Fast Bake submenu on Sequencer's binding right-click menu (BlackEyeFastBakeMenu.cpp). */
 	void RegisterMenus();

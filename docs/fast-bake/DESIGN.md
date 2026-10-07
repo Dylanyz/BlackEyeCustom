@@ -344,6 +344,16 @@ Not built yet: re-sync settings without re-baking (P2); keeping the previous bak
   - **The batch** opens each shot alone (`BakeShot` needs it as root, §6 crash 2), bakes it, and returns to the edit at
     the frame the user left. Settings persist per user (`EditorPerProjectUserSettings`, section
     `BlackEyeCustom.FastBake.Edit`). Cancelling one bake's progress dialog stops the batch.
+  - **Selected sections** (added 2026-10-07, same user): with shot sections selected in the focused sequence, Bake Edit
+    defaults to just those; the dialog switches between "Selected sections" and "Whole edit". One `FBakeScope` (edit,
+    selection, where to return) feeds the same planner, dialog and batch from every entry point, so the two modes
+    can't drift. A selected section is baked whole, even past the edit's playback range. Asked for as a section
+    right-click entry; **rejected because 5.8 has no hook for it:** the section menu is built from a fresh, empty
+    `FExtender` (`SequencerCommonHelpers.cpp:363`), and `FSectionContextMenu::PopulateMenu` only asks the channel
+    interfaces of the selected sections' channel types and the section's own `ISequencerSection`
+    (`SequencerContextMenus.cpp:389-423`, `SequencerHotspots.cpp:346-351`). Reaching it would mean replacing Epic's
+    Cinematic Shot track editor or its double-channel interface (sub-sections carry origin-override double channels,
+    `MovieSceneSubSection.cpp:243`). Selection plus the toolbar button gives the same result.
   - **Accepted over-bake:** a section on a lower row partly hidden by one above is baked whole; it only costs frames.
   - **Measured on the repro** (`Tools/fast_bake_edit_repro.py`, 2026-10-07): the plan for the three-cut edit and its
     nested edit matched the hand-computed spans exactly ([20,90) + [190,240) and [40,80) + [190,240) at 10 handles);

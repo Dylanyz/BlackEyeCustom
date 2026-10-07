@@ -8,7 +8,7 @@ things stand and what to do next.
 - **P0 (spike, measurements): done.** DESIGN §8, §10.
 - **P1 (twin, lock/unlock, menu, undo): built and installed; the twin-tag fix (trap 4.17) installed and verified 2026-10-06.** DESIGN §5, §6.
 - **Bake Edit (bake only what an edit shows, with handles): built and installed 2026-10-07**, verified on the repro
-  (planner, bake, keep-other-keys, seams). DESIGN §6.
+  (planner, bake, keep-other-keys, seams). Selected-sections mode added the same day. DESIGN §6.
 - **P2 (batch, stale flag, re-sync settings): not started.** DESIGN §10.
 
 ## Open issues

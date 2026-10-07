@@ -37,12 +37,14 @@ Three places give the whole picture:
   on the Sequencer toolbar, or right-click the edit in the Content Browser > **Black Eye: Bake Edit...**. A window
   asks for **handles** (keyed frames either side of each cut, for trimming later), **warm-up** (unkeyed frames played
   first, so the camera arrives moving as in playback) and whether to keep each twin's keys from other edits, and
-  lists what it would bake. Every Black Eye camera the edit shows is then baked on only the frames the edit uses, one
+  lists what it would bake. **Select shot sections first** to bake only those (the window offers "Selected sections"
+  or "Whole edit"). Every Black Eye camera the edit shows is then baked on only the frames the edit uses, one
   twin per camera, keyed only there. Nested edits are followed; a shot's own Sub tracks (its scene) are not. Console:
-  `BlackEyeCustom.FastBake.BakeEdit [handles] [warmup] [keep 0|1] [lock 0|1]`, `BlackEyeCustom.FastBake.EditPlan [handles]`.
+  `BlackEyeCustom.FastBake.BakeEdit [handles] [warmup] [keep 0|1] [lock 0|1] [selected 0|1]`,
+  `BlackEyeCustom.FastBake.EditPlan [handles] [selected 0|1]`.
 - **From Python:** `unreal.BlackEyeFastBakeLibrary.bake_shot(sequence, options)` (options: `camera_binding_name`,
   `start_frame`, `end_frame`, `ranges`, `warm_up_frames`, `keep_other_keys`, `sub_steps`, `lock_after_bake`),
-  `get_edit_bake_plan(edit, handle_frames)` (each entry's `ranges` go straight into `options.ranges`),
+  `get_edit_bake_plan(edit, handle_frames)` or `get_sections_bake_plan(sections, handle_frames)` (each entry's `ranges` go straight into `options.ranges`),
   `set_locked(sequence, name, bool)`, `get_bake_info(sequence)`.
 - A frame range bakes only that range; outside it, and between baked ranges, the twin interpolates between the
   nearest keys. Bake the whole shot (the
