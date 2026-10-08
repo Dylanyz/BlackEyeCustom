@@ -483,6 +483,12 @@ Not built yet: re-sync settings without re-baking (P2); keeping the previous bak
       cuts within its playback range) but still reached through its section, so a master bake bakes it in place:
       the shot's instance is evaluated alone and reaches frames outside the section, as handles already do
       (`BlackEyeFastBakeMaster.cpp`, `OverrideRootSequence`). Console: `selected 2`.
+    - **Their shots, every use** (*built 2026-10-08, not yet run*). Dylan, 2026-10-08: select one section in a master
+      and bake *"just that shot ... and only the sections that appear in the master"*. The whole edit's plan, kept to
+      the shots the selected sections reach (`FBakeScope::SelectedShots`, the same `Collect` walk, nested edits
+      followed); the shot list is filtered the same way, with each use's spans, so "only where the edit shows them"
+      locks every use. One selected section would normally hide the shot list behind the one-shot controls, whose
+      lock covers one section only; in this scope the list shows too. Console: `selected 3`.
     - **Content Browser**: Black Eye: Lock Bakes / Unlock Bakes / Delete Bakes... on one or several sequences, the
       same row actions without the window (edits where they show each shot, shots' cameras).
     - Library: `DeleteBakes(LS, CameraBindingName)` (empty name: every baked camera).

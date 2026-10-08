@@ -57,14 +57,16 @@ Three places give the whole picture:
   - **Shots** (an edit, several selected sections, several sequences): every shot camera with what it plays now,
     Lock / Unlock / Delete per shot and **Lock all / Unlock all / Delete all**. With sections selected, **Only what's
     selected** limits lock and unlock to the frames they show.
-  - **Selected sections / Their whole shots / Whole edit:** *Their whole shots* bakes each selected section's shot at
+  - **Selected sections / Their shots, every use / Their whole shots / Whole edit:** *Their shots, every use* bakes
+    the selected sections' shots wherever the edit cuts to them, on only the frames shown: select one section of a
+    shot to bake that shot everywhere in the master. *Their whole shots* bakes each selected section's shot at
     full length, as if it were open on its own, still from the master. Stepping into a shot from the edit counts as
     selecting the section you stepped in through.
 
   Content Browser, on one or several sequences: **Black Eye: Lock Bakes**, **Unlock Bakes**, **Delete Bakes...**.
 
-  Console: `BlackEyeCustom.FastBake.BakeEdit [handles] [warmup] [keep 0|1] [lock 0|1|2] [selected 0|1|2] [mode 0|1|2]
-  [direct 0|1] [setup 0|1]` (selected 2: the whole shots), `BlackEyeCustom.FastBake.EditPlan [handles] [selected 0|1|2] [mode 0|1|2]`.
+  Console: `BlackEyeCustom.FastBake.BakeEdit [handles] [warmup] [keep 0|1] [lock 0|1|2] [selected 0|1|2|3] [mode 0|1|2]
+  [direct 0|1] [setup 0|1]` (selected 2: the whole shots, 3: their shots, every use), `BlackEyeCustom.FastBake.EditPlan [handles] [selected 0|1|2|3] [mode 0|1|2]`.
 - **From Python:** `unreal.BlackEyeFastBakeLibrary.bake_shot(sequence, options)` (options: `camera_binding_name`,
   `start_frame`, `end_frame`, `ranges`, `warm_up_frames`, `settle_each_range`, `keep_other_keys`, `sub_steps`,
   `lock_after_bake`, `lock_baked_frames_only`),
