@@ -19,6 +19,7 @@
       Tools\build_blackeyecustom.ps1 -Install      # build then install (editor must be closed)
       Tools\build_blackeyecustom.ps1 -InstallOnly  # install an existing package without rebuilding
       Tools\build_blackeyecustom.ps1 -InstallWhenClosed  # install it by itself the next time every editor has closed
+                                                     # (the plugin hub's shared queue when present, else a waiter of its own)
       Tools\build_blackeyecustom.ps1 -Engine "C:\Program Files\Epic Games\UE_5.8"
 
     Do not pipe the output through Select-Object -First N: it stops the pipeline (and UAT) early.
@@ -33,7 +34,7 @@ param(
     [switch] $Install,
     [switch] $InstallOnly,
     [switch] $InstallWhenClosed,
-    [switch] $WaitAndInstall   # internal: the hidden waiter -InstallWhenClosed starts
+    [switch] $WaitAndInstall   # internal: the hidden waiter -InstallWhenClosed starts when there is no hub queue
 )
 
 $ErrorActionPreference = "Stop"
@@ -49,6 +50,12 @@ if (-not $Repo) { $Repo = Split-Path -Parent $PSScriptRoot }
 $PluginSubdir = ""
 $PluginDir = if ($PluginSubdir) { Join-Path $Repo $PluginSubdir } else { $Repo }
 $uplugin   = Join-Path $PluginDir "$PluginName.uplugin"
+
+# A plugin hub (a folder of plugin repos) can keep one install queue for all of them at
+# <hub>\.claude\scripts\install_queue.ps1. When this repo sits in one, -InstallWhenClosed queues there
+# and -Status reports it; otherwise this script waits and installs on its own.
+$HubQueue = Join-Path (Split-Path -Parent $Repo) ".claude\scripts\install_queue.ps1"
+if (-not (Test-Path $HubQueue)) { $HubQueue = $null }
 
 # Engine: prefer the version the .uplugin targets, else the newest UE_* install found.
 # Not needed for -Status, which is read-only and never invokes UAT.
@@ -75,8 +82,8 @@ function Test-EditorRunning {
     return [bool](Get-Process UnrealEditor, UnrealEditor-Cmd, CrashReportClientEditor -ErrorAction SilentlyContinue)
 }
 
-# -InstallWhenClosed leaves a hidden waiter; its PID is kept here so -Status can report it and a
-# second request doesn't start another.
+# Without a hub queue, -InstallWhenClosed leaves a hidden waiter; its PID is kept here so -Status can
+# report it and a second request doesn't start another.
 $WaiterFile = "$PackageDir.waiting"
 $InstallLog = "$PackageDir.install.log"
 function Get-Waiter {
@@ -102,6 +109,17 @@ if ($Status) {
     $pend = if (Test-Path $pendDll) { Get-Item $pendDll } else { $null }
     $editorUp = Test-EditorRunning
     $waiter = Get-Waiter
+    $hub = if ($HubQueue) { & $HubQueue -Query -Plugin $PluginName } else { $null }
+
+    # Every DLL in the package against the installed copy, by content: robocopy keeps timestamps, so a
+    # timestamp can't tell an installed build from a newer one.
+    $differ = @()
+    if ($pend) {
+        foreach ($d in Get-ChildItem (Join-Path $PackageDir "Binaries\Win64") -Filter *.dll -File) {
+            $i = Join-Path $PluginDir "Binaries\Win64\$($d.Name)"
+            if (-not (Test-Path $i) -or (Get-FileHash $i).Hash -ne (Get-FileHash $d.FullName).Hash) { $differ += $d.Name }
+        }
+    }
 
     "$PluginName status"
     "  plugin        $PluginDir"
@@ -109,16 +127,23 @@ if ($Status) {
                                  $(if ($newestSrc) { $newestSrc.Name } else { '' })
     "  installed DLL {0}" -f $(if ($inst) { $inst.LastWriteTime.ToString('yyyy-MM-dd HH:mm') } else { 'NOT INSTALLED' })
     "  built package {0}" -f $(if ($pend) { $pend.LastWriteTime.ToString('yyyy-MM-dd HH:mm') + "  ($PackageDir)" } else { 'none' })
+    if ($pend) { "  match         {0}" -f $(if ($differ) { "DIFFERS: $($differ -join ', ')" } else { 'MATCH: the built package is installed' }) }
     "  editor        {0}" -f $(if ($editorUp) { 'RUNNING - installing is blocked' } else { 'not running - safe to install' })
     if ($waiter) { "  pending       installs when every editor has closed (waiter pid $($waiter.Id), log $InstallLog)" }
+    if ($hub -and $hub.Queued) {
+        "  pending       queued {0} in the hub install queue ({1})" -f $hub.QueuedAt,
+            $(if ($hub.WaiterPid) { "waiter pid $($hub.WaiterPid)" } else { 'NO WAITER RUNNING: re-run -InstallWhenClosed' })
+    }
+    if ($hub -and $hub.Last) { "  last install  {0}  {1}  {2}" -f $hub.Last.time, $hub.Last.result, $hub.Last.message }
 
     $needsBuild   = $newestSrc -and (-not $inst -or $newestSrc.LastWriteTime -gt $inst.LastWriteTime) -and
                     (-not $pend -or $newestSrc.LastWriteTime -gt $pend.LastWriteTime)
-    $needsInstall = $pend -and (-not $inst -or $pend.LastWriteTime -gt $inst.LastWriteTime)
+    $needsInstall = $pend -and $differ
+    $queued       = $waiter -or ($hub -and $hub.Queued -and $hub.WaiterPid)
 
     ""
     if ($needsBuild)        { "NEXT: source is newer than any build. Run this script with no switches." }
-    elseif ($needsInstall -and $waiter) { "NEXT: nothing. The waiting build installs itself when the editor closes; relaunch after that." }
+    elseif ($needsInstall -and $queued) { "NEXT: nothing. The waiting build installs itself when the editor closes; relaunch after that." }
     elseif ($needsInstall)  { if ($editorUp) { "NEXT: a newer build is waiting. ask whether the editor is free; once it is closed, run -InstallOnly." }
                               else           { "NEXT: a newer build is waiting and the editor is closed. Run -InstallOnly." } }
     else                    { "NEXT: nothing to do. The installed DLL is up to date with the source." }
@@ -183,14 +208,16 @@ if (-not ($InstallOnly -or $InstallWhenClosed -or $WaitAndInstall)) {
     }
 }
 
-# ---------------------------------------------------------------- install
 # ---------------------------------------------------------------- install when the editor closes
-# The DLL is locked while any editor runs, so the install waits in a hidden PowerShell that polls for
-# every editor process to be gone (then 2 s more, in case one is starting), installs, and exits. A
-# restart that quits and relaunches within ~3 s, or the editor's own Restart button (the new process
-# starts before the old one exits), can miss the gap: the waiter then keeps waiting for the next close.
+# The DLL is locked while any editor runs. In a plugin hub the hub queue does the waiting for every
+# plugin at once (it runs this script's -InstallOnly per plugin and records each result). Alone, the
+# install waits in a hidden PowerShell that polls for every editor process to be gone (then 2 s more,
+# in case one is starting), installs, and exits. A restart that quits and relaunches within ~3 s, or the
+# editor's own Restart button (the new process starts before the old one exits), can miss the gap: the
+# waiter then keeps waiting for the next close.
 if ($InstallWhenClosed) {
     if (-not (Test-Path (Join-Path $PackageDir "Binaries\Win64"))) { throw "No built package at $PackageDir. Build first." }
+    if ($HubQueue) { & $HubQueue -Add -Plugin $PluginName -PackageDir $PackageDir; return }
     if (-not (Test-EditorRunning)) { $InstallOnly = $true }
     elseif ($w = Get-Waiter) { Write-Host "Already waiting to install (pid $($w.Id))." -ForegroundColor Yellow; return }
     else {
@@ -213,6 +240,7 @@ if ($WaitAndInstall) {
     $InstallOnly = $true
 }
 
+# ---------------------------------------------------------------- install
 if (-not ($Install -or $InstallOnly)) {
     Write-Host ""
     Write-Host "Not installed. The package is waiting at $PackageDir." -ForegroundColor Yellow
