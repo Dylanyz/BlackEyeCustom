@@ -14,6 +14,8 @@ things stand and what to do next.
 - **Shot list (lock / unlock / delete per shot and all), Delete, "Their whole shots", stepped-in section = selected,
   Content Browser Lock / Unlock / Delete Bakes: built, installed and measured on the repro 2026-10-07** (DESIGN §6
   "Shot list, delete, whole shots, stepped-in section"). Not run: the Content Browser entries; Dylan to try by hand.
+- **Bake window wording (when to pick each option, old ways folded under "Fallback"): built 2026-10-08**, installs
+  itself on Dylan's next editor close (`-InstallWhenClosed`); not yet seen by eye.
 - **P2 (batch, stale flag, re-sync settings): not started.** DESIGN §10.
 
 ## Open issues

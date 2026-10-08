@@ -37,6 +37,7 @@
 #include "Widgets/Input/SSpinBox.h"
 #include "Widgets/Layout/SBorder.h"
 #include "Widgets/Layout/SBox.h"
+#include "Widgets/Layout/SExpandableArea.h"
 #include "Widgets/Layout/SScrollBox.h"
 #include "Widgets/SBoxPanel.h"
 #include "Widgets/SWindow.h"
@@ -1771,43 +1772,51 @@ namespace BlackEyeFastBake
 								MakeShotsBox(Scope, RowsUI)
 							]
 
-							// 1. How to bake
+							// 1. How to bake. The two real choices up front; the old ways, which give the same result
+							// slower, folded into a fallback (open when one is already chosen).
 							+ SVerticalBox::Slot().AutoHeight().Padding(0, 6, 0, 0)[ Heading(LOCTEXT("HowHeading", "How to bake")) ]
+							+ SVerticalBox::Slot().AutoHeight()
+							[
+								SNew(STextBlock).AutoWrapText(true).Margin(FMargin(0, 4, 0, 0))
+								.ColorAndOpacity(FSlateColor::UseSubduedForeground())
+								.Text(LOCTEXT("HowExplain", "A Black Eye camera eases toward its subject, so what it's doing at a cut depends on "
+								                            "where recording started. That's the whole choice here. Both bake from inside this "
+								                            "edit, one shot at a time; nothing is reopened."))
+							]
 							+ SVerticalBox::Slot().AutoHeight()
 							[
 								SNew(STextBlock).AutoWrapText(true).Margin(FMargin(0, 4, 0, 0))
 								.Visibility(Scope->IsMany() ? EVisibility::Visible : EVisibility::Collapsed)
 								.ColorAndOpacity(FSlateColor::UseSubduedForeground())
-								.Text(LOCTEXT("ManyExplain", "Several sequences: each shot is opened on its own to bake it (\"From the master\" needs "
-								                             "one open edit). \"Like a render\" and \"With handles\" still choose how each cut starts. "
-								                             "Shots are baked at their full length, edits where they show each shot."))
-							]
-							+ SVerticalBox::Slot().AutoHeight()
-							[
-								SNew(STextBlock).AutoWrapText(true).Margin(FMargin(0, 4, 0, 0))
-								.Text(LOCTEXT("MasterExplain", "From the master (new, fast): stays in this edit. For each shot, Sequencer plays just "
-								                               "that shot inside the edit, the camera is stepped frame by frame and recorded. Nothing "
-								                               "is opened or closed, so there's no wait for a big edit to reopen."))
+								.Text(LOCTEXT("ManyExplain", "Several sequences: each shot is opened on its own to bake it, like the fallback "
+								                             "below. The choice still sets how each cut starts. Shots are baked at full length, "
+								                             "edits where they show each shot."))
 							]
 							+ SVerticalBox::Slot().AutoHeight()
 							[
 								IntChoice(Mode, FEditBakeSettings::MasterLikeRender, LOCTEXT("LikeRender", "Like a render"),
-									LOCTEXT("LikeRenderExplain", "At every cut the camera starts already settled on its subject, just like a final "
-									                             "render. Only the frames the edit shows are baked, plus extra frames after each cut. "
-									                             "If you later make a shot start earlier, bake again."), 16.f)
+									LOCTEXT("LikeRenderExplain", "Matches the final render: at every cut the camera starts settled on its "
+									                             "subject. Pick it once the cut is set. Move a cut earlier later? Bake again."), 16.f)
 							]
 							+ SVerticalBox::Slot().AutoHeight()
 							[
 								IntChoice(Mode, FEditBakeSettings::MasterHandles, LOCTEXT("WithHandles", "With handles"),
-									LOCTEXT("WithHandlesExplain", "Also bakes frames before each cut, so you can trim the edit later without "
-									                              "baking again. The catch: the camera settles at the start of the handle, so at the "
-									                              "cut it's already moving and lagging, not settled like a render."), 16.f)
+									LOCTEXT("WithHandlesExplain", "Room to trim: also bakes frames before each cut, so you can move a cut "
+									                              "earlier without baking again. The catch: recording starts at the handle, so at "
+									                              "the cut the camera is already moving, not settled like the render."), 16.f)
 							]
-							+ SVerticalBox::Slot().AutoHeight()
+							+ SVerticalBox::Slot().AutoHeight().Padding(16, 4, 0, 0)
 							[
-								IntChoice(Mode, FEditBakeSettings::ShotByShot, LOCTEXT("ShotByShot", "Shot by shot (the old way)"),
-									LOCTEXT("ShotByShotExplain", "Opens each shot on its own, bakes it, then opens this edit again. Same result "
-									                             "as \"With handles\", but reopening a big edit can freeze the editor for minutes."))
+								SNew(SExpandableArea)
+								.InitiallyCollapsed(Settings->Mode != FEditBakeSettings::ShotByShot)
+								.AreaTitle(LOCTEXT("ModeFallback", "Fallback: same result, slower"))
+								.BodyContent()
+								[
+									IntChoice(Mode, FEditBakeSettings::ShotByShot, LOCTEXT("ShotByShot", "Shot by shot (the old way)"),
+										LOCTEXT("ShotByShotExplain", "Same result as With handles. Opens each shot on its own, bakes it, then "
+										                             "reopens this edit, which can freeze a big edit for minutes. Use it only if "
+										                             "baking from here refuses a shot (a time warp or loop) or misbehaves."))
+								]
 							]
 							+ SVerticalBox::Slot().AutoHeight().Padding(0, 8, 0, 2)
 							[
@@ -1822,40 +1831,56 @@ namespace BlackEyeFastBake
 									                     "playback. Not used by \"Like a render\", which settles at the cut instead."), HasHeadHandles))
 							]
 
-							// 2. The twin
-							+ SVerticalBox::Slot().AutoHeight().Padding(0, 14, 0, 0)[ Heading(LOCTEXT("TwinHeading", "The twin")) ]
+							// 2. The twin: what changes on it. How it's written is a fallback, as above.
+							+ SVerticalBox::Slot().AutoHeight().Padding(0, 14, 0, 0)[ Heading(LOCTEXT("TwinHeading", "The twin (the bake camera)")) ]
+							+ SVerticalBox::Slot().AutoHeight().Padding(0, 4, 0, 0)[ SNew(STextBlock).Text(LOCTEXT("SetupGroup", "Its camera setup")) ]
 							+ SVerticalBox::Slot().AutoHeight()
 							[
-								BoolChoice(&Settings->bWriteDirect, true, LOCTEXT("Direct", "Write it directly (new)"),
-									LOCTEXT("DirectExplain", "Writes the twin straight into each shot's data. No stepping into shots."))
-							]
-							+ SVerticalBox::Slot().AutoHeight()
-							[
-								BoolChoice(&Settings->bWriteDirect, false, LOCTEXT("Inside", "Write it inside each shot (the old way, tested)"),
-									LOCTEXT("InsideExplain", "Sequencer steps into each shot, sets the twin up on a live copy and saves it. "
-									                         "Slower; always copies the camera setup too."))
-							]
-							+ SVerticalBox::Slot().AutoHeight().Padding(0, 6, 0, 0)
-							[
-								BoolChoice(&Settings->bRefreshSetup, false, LOCTEXT("KeysOnly", "Keys only"),
-									LOCTEXT("KeysOnlyExplain", "Only the motion and lens keys change. A twin keeps its camera setup (a new "
-									                           "twin always gets one)."), 16.f, IsDirect)
+								BoolChoice(&Settings->bRefreshSetup, false, LOCTEXT("KeysOnly", "Keys only (usual)"),
+									LOCTEXT("KeysOnlyExplain", "Only the motion and lens keys change; the twin keeps its lens, filmback and "
+									                           "components. A new twin always gets the full setup."), 16.f, IsDirect)
 							]
 							+ SVerticalBox::Slot().AutoHeight()
 							[
 								BoolChoice(&Settings->bRefreshSetup, true, LOCTEXT("Setup", "Keys and camera setup"),
 									LOCTEXT("SetupExplain", "Also copies the Black Eye camera's lens, filmback and extra components again. "
-									                        "Use it after changing the camera's setup."), 16.f, IsDirect)
+									                        "Pick it after changing any of those on the camera."), 16.f, IsDirect)
 							]
-							+ SVerticalBox::Slot().AutoHeight().Padding(0, 6, 0, 0)
+							+ SVerticalBox::Slot().AutoHeight().Padding(0, 8, 0, 0)[ SNew(STextBlock).Text(LOCTEXT("KeepGroup", "Frames baked before")) ]
+							+ SVerticalBox::Slot().AutoHeight()
 							[
-								BoolChoice(&Settings->bKeepOtherKeys, true, LOCTEXT("Keep", "Keep other baked frames"),
-									LOCTEXT("KeepExplain", "Frames baked before (for another edit) stay. Only these frames are replaced."))
+								BoolChoice(&Settings->bKeepOtherKeys, true, LOCTEXT("Keep", "Keep other baked frames (usual)"),
+									LOCTEXT("KeepExplain", "A shot used in several edits has one twin. Frames baked for the other edits "
+									                       "stay; only these frames are replaced."), 16.f)
 							]
 							+ SVerticalBox::Slot().AutoHeight()
 							[
 								BoolChoice(&Settings->bKeepOtherKeys, false, LOCTEXT("Replace", "Replace them all"),
-									LOCTEXT("ReplaceExplain", "The twin keeps only this bake."))
+									LOCTEXT("ReplaceExplain", "The twin keeps only this bake. For a clean slate, e.g. frames left from a cut "
+									                          "you dropped."), 16.f)
+							]
+							+ SVerticalBox::Slot().AutoHeight().Padding(16, 4, 0, 0)
+							[
+								SNew(SExpandableArea)
+								.InitiallyCollapsed(Settings->bWriteDirect)
+								.AreaTitle(LOCTEXT("TwinFallback", "Fallback: same result, slower"))
+								.BodyContent()
+								[
+									SNew(SVerticalBox)
+									+ SVerticalBox::Slot().AutoHeight()
+									[
+										BoolChoice(&Settings->bWriteDirect, true, LOCTEXT("Direct", "Write it directly (usual)"),
+											LOCTEXT("DirectExplain", "Writes the twin straight into each shot's data, without stepping into "
+											                         "the shot."))
+									]
+									+ SVerticalBox::Slot().AutoHeight()
+									[
+										BoolChoice(&Settings->bWriteDirect, false, LOCTEXT("Inside", "Write it inside each shot (the old way)"),
+											LOCTEXT("InsideExplain", "Same result. Sequencer steps into each shot and saves the twin through it: "
+											                         "slower, but the longer-tested path. Use it if a twin written directly looks "
+											                         "wrong. Always copies the camera setup, so the setup choice is greyed out."))
+									]
+								]
 							]
 
 							// 3. Lock

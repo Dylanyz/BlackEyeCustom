@@ -39,12 +39,15 @@ Three places give the whole picture:
   on the Sequencer toolbar, or right-click the edit in the Content Browser > **Black Eye: Bake Edit...**. Every Black
   Eye camera the edit shows is baked on only the frames the edit uses, one twin per camera. **Select shot sections
   first** to bake only those. Nested edits are followed; a shot's own Sub tracks (its scene) are not. The window asks:
-  - **How to bake.** *From the master* stays in the edit and plays each shot inside it (nothing is reopened):
-    *Like a render* starts every cut with the camera settled on its subject, as a render does, plus extra frames after
-    each cut; *With handles* also bakes frames before each cut, so the camera is already moving at the cut.
-    *Shot by shot* (the original way) opens each shot alone, with handles and warm-up, then reopens the edit.
-  - **The twin.** Written *directly* as data, or *inside each shot* through Sequencer (the original way); *keys only*
-    or keys and camera setup; keep or replace frames baked before.
+  - **How to bake.** A Black Eye camera eases toward its subject, so the choice is what it's doing at each cut. Both
+    stay in the edit and play each shot inside it (nothing is reopened). *Like a render* starts every cut with the
+    camera settled on its subject, as a render does, plus extra frames after each cut: pick it once the cut is set.
+    *With handles* also bakes frames before each cut, so cuts can move earlier without a re-bake, but the camera is
+    already moving at the cut. Folded under *Fallback*: *Shot by shot* (the original way), the same result as With
+    handles, opens each shot alone and then reopens the edit (minutes on a big one).
+  - **The twin.** *Keys only* or keys and camera setup (after changing the camera's lens, filmback or components);
+    keep frames baked for other edits or replace them all. Folded under *Fallback*: written *directly* as data, or
+    *inside each shot* through Sequencer (the original way), the same result, slower.
   - **Afterwards the shots play** the bake everywhere, the bake only on the frames baked (the camera cut is split
     there; the rest stays live Black Eye), or the live camera.
   - **This shot** (when one shot section is selected, or a shot is open with nothing selected): pick its Black Eye

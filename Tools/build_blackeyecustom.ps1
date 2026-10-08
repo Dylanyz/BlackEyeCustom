@@ -18,6 +18,7 @@
       Tools\build_blackeyecustom.ps1               # build only, leaves the package in $PackageDir
       Tools\build_blackeyecustom.ps1 -Install      # build then install (editor must be closed)
       Tools\build_blackeyecustom.ps1 -InstallOnly  # install an existing package without rebuilding
+      Tools\build_blackeyecustom.ps1 -InstallWhenClosed  # install it by itself the next time every editor has closed
       Tools\build_blackeyecustom.ps1 -Engine "C:\Program Files\Epic Games\UE_5.8"
 
     Do not pipe the output through Select-Object -First N: it stops the pipeline (and UAT) early.
@@ -30,7 +31,9 @@ param(
     [string] $PackageDir = "$env:TEMP\bcb",
     [switch] $Status,
     [switch] $Install,
-    [switch] $InstallOnly
+    [switch] $InstallOnly,
+    [switch] $InstallWhenClosed,
+    [switch] $WaitAndInstall   # internal: the hidden waiter -InstallWhenClosed starts
 )
 
 $ErrorActionPreference = "Stop"
@@ -72,6 +75,19 @@ function Test-EditorRunning {
     return [bool](Get-Process UnrealEditor, UnrealEditor-Cmd, CrashReportClientEditor -ErrorAction SilentlyContinue)
 }
 
+# -InstallWhenClosed leaves a hidden waiter; its PID is kept here so -Status can report it and a
+# second request doesn't start another.
+$WaiterFile = "$PackageDir.waiting"
+$InstallLog = "$PackageDir.install.log"
+function Get-Waiter {
+    if (-not (Test-Path $WaiterFile)) { return $null }
+    $waiterPid = [int](Get-Content $WaiterFile -Raw)
+    $p = Get-Process -Id $waiterPid -ErrorAction SilentlyContinue
+    if ($p -and $p.ProcessName -like "powershell*") { return $p }
+    Remove-Item $WaiterFile -ErrorAction SilentlyContinue
+    return $null
+}
+
 # ---------------------------------------------------------------- status
 # One call that answers "where is this plugin up to, and what is the next action?"
 # Read-only. Safe any time, editor running or not.
@@ -85,6 +101,7 @@ if ($Status) {
     $inst = if (Test-Path $instDll) { Get-Item $instDll } else { $null }
     $pend = if (Test-Path $pendDll) { Get-Item $pendDll } else { $null }
     $editorUp = Test-EditorRunning
+    $waiter = Get-Waiter
 
     "$PluginName status"
     "  plugin        $PluginDir"
@@ -93,6 +110,7 @@ if ($Status) {
     "  installed DLL {0}" -f $(if ($inst) { $inst.LastWriteTime.ToString('yyyy-MM-dd HH:mm') } else { 'NOT INSTALLED' })
     "  built package {0}" -f $(if ($pend) { $pend.LastWriteTime.ToString('yyyy-MM-dd HH:mm') + "  ($PackageDir)" } else { 'none' })
     "  editor        {0}" -f $(if ($editorUp) { 'RUNNING - installing is blocked' } else { 'not running - safe to install' })
+    if ($waiter) { "  pending       installs when every editor has closed (waiter pid $($waiter.Id), log $InstallLog)" }
 
     $needsBuild   = $newestSrc -and (-not $inst -or $newestSrc.LastWriteTime -gt $inst.LastWriteTime) -and
                     (-not $pend -or $newestSrc.LastWriteTime -gt $pend.LastWriteTime)
@@ -100,6 +118,7 @@ if ($Status) {
 
     ""
     if ($needsBuild)        { "NEXT: source is newer than any build. Run this script with no switches." }
+    elseif ($needsInstall -and $waiter) { "NEXT: nothing. The waiting build installs itself when the editor closes; relaunch after that." }
     elseif ($needsInstall)  { if ($editorUp) { "NEXT: a newer build is waiting. ask whether the editor is free; once it is closed, run -InstallOnly." }
                               else           { "NEXT: a newer build is waiting and the editor is closed. Run -InstallOnly." } }
     else                    { "NEXT: nothing to do. The installed DLL is up to date with the source." }
@@ -112,7 +131,7 @@ foreach ($p in @($uplugin, $runUAT)) {
 }
 
 # ---------------------------------------------------------------- build
-if (-not $InstallOnly) {
+if (-not ($InstallOnly -or $InstallWhenClosed -or $WaitAndInstall)) {
 
     # A writable UE_SDKS_ROOT quiets UBT's AutoSDK probe for platforms we do not target.
     # NOTE: this does NOT satisfy the .NET Framework SDK requirement. UBT needs a real NetFxSDK to
@@ -165,10 +184,40 @@ if (-not $InstallOnly) {
 }
 
 # ---------------------------------------------------------------- install
+# ---------------------------------------------------------------- install when the editor closes
+# The DLL is locked while any editor runs, so the install waits in a hidden PowerShell that polls for
+# every editor process to be gone (then 2 s more, in case one is starting), installs, and exits. A
+# restart that quits and relaunches within ~3 s, or the editor's own Restart button (the new process
+# starts before the old one exits), can miss the gap: the waiter then keeps waiting for the next close.
+if ($InstallWhenClosed) {
+    if (-not (Test-Path (Join-Path $PackageDir "Binaries\Win64"))) { throw "No built package at $PackageDir. Build first." }
+    if (-not (Test-EditorRunning)) { $InstallOnly = $true }
+    elseif ($w = Get-Waiter) { Write-Host "Already waiting to install (pid $($w.Id))." -ForegroundColor Yellow; return }
+    else {
+        $fwd = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$PSCommandPath`"", "-WaitAndInstall",
+                 "-Repo", "`"$Repo`"", "-PackageDir", "`"$PackageDir`"", "-Engine", "`"$Engine`"")
+        $p = Start-Process powershell.exe -ArgumentList $fwd -WindowStyle Hidden -PassThru
+        Set-Content -Path $WaiterFile -Value $p.Id -NoNewline
+        Write-Host "Install waits for every editor to close (pid $($p.Id)); the next launch loads it. Log: $InstallLog" -ForegroundColor Green
+        return
+    }
+}
+if ($WaitAndInstall) {
+    Start-Transcript -Path $InstallLog -Append | Out-Null
+    Write-Host ("{0:yyyy-MM-dd HH:mm:ss} waiting for every editor to close" -f (Get-Date))
+    do {
+        while (Test-EditorRunning) { Start-Sleep -Seconds 1 }
+        Start-Sleep -Seconds 2
+    } while (Test-EditorRunning)
+    Remove-Item $WaiterFile -ErrorAction SilentlyContinue
+    $InstallOnly = $true
+}
+
 if (-not ($Install -or $InstallOnly)) {
     Write-Host ""
     Write-Host "Not installed. The package is waiting at $PackageDir." -ForegroundColor Yellow
-    Write-Host "Installing needs the editor closed - ask first, then re-run with -InstallOnly." -ForegroundColor Yellow
+    Write-Host "Installing needs the editor closed - ask first, then re-run with -InstallOnly," -ForegroundColor Yellow
+    Write-Host "or -InstallWhenClosed to install by itself the next time every editor has closed." -ForegroundColor Yellow
     return
 }
 
