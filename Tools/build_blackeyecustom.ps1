@@ -132,7 +132,8 @@ if ($Status) {
     if ($waiter) { "  pending       installs when every editor has closed (waiter pid $($waiter.Id), log $InstallLog)" }
     if ($hub -and $hub.Queued) {
         "  pending       queued {0} in the hub install queue ({1})" -f $hub.QueuedAt,
-            $(if ($hub.WaiterPid) { "waiter pid $($hub.WaiterPid)" } else { 'NO WAITER RUNNING: re-run -InstallWhenClosed' })
+            $(if ($hub.Auto -eq $false) { 'manual: installs only when asked, from the hub tray or its -InstallNow' }
+              elseif ($hub.WaiterPid) { "installs on close, waiter pid $($hub.WaiterPid)" } else { 'NO WAITER RUNNING: re-run -InstallWhenClosed' })
     }
     if ($hub -and $hub.Last) { "  last install  {0}  {1}  {2}" -f $hub.Last.time, $hub.Last.result, $hub.Last.message }
 
@@ -140,9 +141,11 @@ if ($Status) {
                     (-not $pend -or $newestSrc.LastWriteTime -gt $pend.LastWriteTime)
     $needsInstall = $pend -and $differ
     $queued       = $waiter -or ($hub -and $hub.Queued -and $hub.WaiterPid)
+    $manual       = $hub -and $hub.Queued -and $hub.Auto -eq $false
 
     ""
     if ($needsBuild)        { "NEXT: source is newer than any build. Run this script with no switches." }
+    elseif ($needsInstall -and $manual) { "NEXT: nothing. The build is queued for a manual install (set in the hub tray); it installs when that is asked for." }
     elseif ($needsInstall -and $queued) { "NEXT: nothing. The waiting build installs itself when the editor closes; relaunch after that." }
     elseif ($needsInstall)  { if ($editorUp) { "NEXT: a newer build is waiting. ask whether the editor is free; once it is closed, run -InstallOnly." }
                               else           { "NEXT: a newer build is waiting and the editor is closed. Run -InstallOnly." } }
