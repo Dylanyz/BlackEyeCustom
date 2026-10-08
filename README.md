@@ -55,7 +55,8 @@ Three places give the whole picture:
     Lock / Unlock / Delete per shot and **Lock all / Unlock all / Delete all**. With sections selected, **Only what's
     selected** limits lock and unlock to the frames they show.
   - **Selected sections / Their whole shots / Whole edit:** *Their whole shots* bakes each selected section's shot at
-    full length, as if it were open on its own, still from the master.
+    full length, as if it were open on its own, still from the master. Stepping into a shot from the edit counts as
+    selecting the section you stepped in through.
 
   Content Browser, on one or several sequences: **Black Eye: Lock Bakes**, **Unlock Bakes**, **Delete Bakes...**.
 

@@ -11,11 +11,9 @@ things stand and what to do next.
   (planner, bake, keep-other-keys, seams). Selected-sections mode added the same day. DESIGN §6.
 - **Bake Edit from the master, shot controls, one window for every way in: built, installed and measured on the
   repro 2026-10-07** (DESIGN §6 "Measured on the repro"). Master bake = shot-by-shot bake to 0.0001 deg.
-- **Shot list (lock / unlock / delete per shot and all), Delete, "Their whole shots", Content Browser Lock / Unlock /
-  Delete Bakes: built and installed 2026-10-07 (12:40 DLL), not run yet; committed as WIP at Dylan's request 2026-10-07, untested.** DESIGN §6 "Shot list, delete, whole shots".
-  Next: SelfTest, then on the repro: Unlock all / Lock all in the master with and
-  without "Only what's selected", Delete one and Delete all + one undo, whole-shots plan and a master bake of it, the
-  Content Browser entries.
+- **Shot list (lock / unlock / delete per shot and all), Delete, "Their whole shots", stepped-in section = selected,
+  Content Browser Lock / Unlock / Delete Bakes: built, installed and measured on the repro 2026-10-07** (DESIGN §6
+  "Shot list, delete, whole shots, stepped-in section"). Not run: the Content Browser entries; Dylan to try by hand.
 - **P2 (batch, stale flag, re-sync settings): not started.** DESIGN §10.
 
 ## Open issues

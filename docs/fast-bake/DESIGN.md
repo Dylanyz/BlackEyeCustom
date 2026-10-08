@@ -453,7 +453,7 @@ Not built yet: re-sync settings without re-baking (P2); keeping the previous bak
     - Not measured: the Content Browser entry (synthetic right-clicks don't open its menu); the first editor frame
       after a master bake on a production master (writing twins changes the shots, which Sequencer recompiles on its
       next tick, `Sequencer.cpp:1118-1126`; hypothesis: per shot, not the master's minutes).
-  - **Shot list, delete, whole shots** (*built 2026-10-07, not yet run in the editor*). Dylan, 2026-10-07: in a master
+  - **Shot list, delete, whole shots, stepped-in section** (*built and measured on the repro 2026-10-07*). Dylan, 2026-10-07: in a master
     he wants to *"switch all of my sections at once to unlock and use the black eye"*, to delete the bakes of a whole
     sequence in bulk, the same from the Content Browser, and from a selected section *"the option to bake the entire
     sequence"*. All of it reuses the scope, so every way in gets it (no second panel):
@@ -481,6 +481,26 @@ Not built yet: re-sync settings without re-baking (P2); keeping the previous bak
     - **Content Browser**: Black Eye: Lock Bakes / Unlock Bakes / Delete Bakes... on one or several sequences, the
       same row actions without the window (edits where they show each shot, shots' cameras).
     - Library: `DeleteBakes(LS, CameraBindingName)` (empty name: every baked camera).
+    - **Stepped into a shot from its edit** (Dylan, 2026-10-07: *"to be able to do the controls for only that section
+      rather than the whole shot extent"*): with nothing selected and Sequencer focused below its root, `ScopeOf`
+      takes the section it was entered through (`ISequencer::FindSubSection`, `Sequencer.cpp:1388-1420`) as if it
+      were selected in its edit. The toolbar and a camera's right-click Bake... both get the one-shot controls for
+      that section ("Only this section" on), the plan for its frames, and the three scope choices. A master bake
+      uses the Sequencer the window came from, so it bakes in place even when that Sequencer is focused inside the
+      shot or holds the edit nested. Before this, stepping in meant the whole shot.
+    - **Measured on the repro (2026-10-07):** delete on a duplicate of the shot removed exactly the two bake cameras
+      and their camera-component bindings (BEC and subject untouched); locked first, every cut went back to the BEC;
+      one undo restored bindings, tag and lock. Plans with the first section selected: selected [20,80), whole shot
+      [0,300), whole edit [20,90) + [190,240); the whole-shot master bake keyed 0-299 with nothing reopened. Window,
+      three sections selected: Lock all with "only what's selected" split the cuts to exactly [30,80) and [200,230)
+      on the bake; Unlock all put them back; the row's delete removed the current bake camera and kept `_Bake2`;
+      Delete all removed it too, one undo restored it. Stepped into the second section: plan [200,240) (Like a
+      render, 10 after), whole shots [0,300), Lock split only [200,230). The row status first read the hull of the
+      spans ("mixed" for frames between sections); it now reads each span. Not run: the Content Browser entries
+      (synthetic right-clicks don't open that menu) and a camera's right-click from inside a shot (same scope code
+      as the toolbar).
+    - **Trap:** the window is modal (`AddModalWindow`), so Python remote execution doesn't answer while it is open;
+      close it before reading results from a script.
 - **Content Browser batch over a folder** (P2): right-click shot Level Sequence(s) ▸ Bake Black Eye cameras, whole
   shots, all angles at once.
 - **`UBlackEyeFastBakeLibrary`** (built; BlueprintCallable, so Python and agents can drive it): `BakeShot(LS, Options)`,

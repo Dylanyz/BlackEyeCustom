@@ -570,6 +570,8 @@ namespace BlackEyeFastBake
 			return Plans;
 		}
 
+		TArray<TRange<FFrameNumber>> MergeSpans(TArray<TRange<FFrameNumber>> Spans);
+
 		/**
 		 * One Black Eye camera of one shot in a scope, for the window's shot list: lock, unlock and delete act on these.
 		 * Spans: the shot ticks the selected sections show; empty, or "only what's selected" off, means the whole shot.
@@ -618,16 +620,20 @@ namespace BlackEyeFastBake
 				{
 					NumTwins += Twin.Camera == Camera ? Twin.Alive.Num() : 0;
 				}
-				TRange<FFrameNumber> Hull = TRange<FFrameNumber>::All();
-				if (bOnlySelected && Spans.Num())
+				// Each shown span on its own: the frames between them are none of this scope's business.
+				const TArray<TRange<FFrameNumber>> Shown = bOnlySelected && Spans.Num() ? MergeSpans(Spans) : TArray<TRange<FFrameNumber>>{ TRange<FFrameNumber>::All() };
+				for (const TRange<FFrameNumber>& Span : Shown)
 				{
-					Hull = Spans[0];
-					for (const TRange<FFrameNumber>& Span : Spans)
+					const FString One = DescribeCutPlay(*S->GetMovieScene(), Camera, Span);
+					if (Status.IsEmpty())
 					{
-						Hull = TRange<FFrameNumber>::Hull(Hull, Span);
+						Status = One;
+					}
+					else if (Status != One)
+					{
+						Status = TEXT("mixed: part live Black Eye, part bake");
 					}
 				}
-				Status = DescribeCutPlay(*S->GetMovieScene(), Camera, Hull);
 			}
 		};
 
@@ -644,6 +650,7 @@ namespace BlackEyeFastBake
 			bool bWholeShots = false;                               // with bSelectedOnly: the selected sections' shots at full length
 			TSharedPtr<FShotTarget> Target;                         // one shot's controls, when the scope is about one shot
 			int32 Generation = 0;                                   // bumped when lock / delete change the shots: re-plan
+			bool bEntered = false;                                  // Selected is the section Sequencer was stepped in through
 			TWeakPtr<ISequencer> Sequencer;                         // where it was opened from, refreshed after lock / unlock
 			TArray<TWeakObjectPtr<ULevelSequence>> Many;            // several sequences picked in the Content Browser
 
@@ -871,6 +878,21 @@ namespace BlackEyeFastBake
 			Scope.Edit = Cast<ULevelSequence>(Sequencer.GetFocusedMovieSceneSequence());
 			Scope.ReturnTo = Cast<ULevelSequence>(Sequencer.GetRootMovieSceneSequence());
 			Scope.Selected = SelectedShotSections(Sequencer);
+			// Stepped into a shot from its edit, nothing selected: the section it was entered through, as if selected in
+			// the edit, so the window acts on the frames the edit shows (Dylan, 2026-10-07: "to be able to do the controls
+			// for only that section rather than the whole shot extent"). FindSubSection returns that section in its
+			// parent (Sequencer.cpp:1388-1420).
+			if (Scope.Selected.Num() == 0 && Sequencer.GetFocusedTemplateID() != MovieSceneSequenceID::Root)
+			{
+				UMovieSceneSubSection* Entered = Sequencer.FindSubSection(Sequencer.GetFocusedTemplateID());
+				ULevelSequence* Parent = Entered && Entered->GetTypedOuter<UMovieSceneCinematicShotTrack>() ? Entered->GetTypedOuter<ULevelSequence>() : nullptr;
+				if (Parent)
+				{
+					Scope.Edit = Parent;
+					Scope.Selected.Add(Entered);
+					Scope.bEntered = true;
+				}
+			}
 			Scope.bSelectedOnly = Scope.Selected.Num() > 0;
 			Scope.Sequencer = Sequencer.AsShared();
 			return Scope;
@@ -1136,7 +1158,13 @@ namespace BlackEyeFastBake
 		void StartMaster(const FBakeScope& Scope, const FEditBakeSettings& Settings, bool bOpened = false)
 		{
 			ULevelSequence* EditSequence = Scope.Edit.Get();
-			const TSharedPtr<ISequencer> Sequencer = SequencerShowing(EditSequence);
+			// The Sequencer the window came from first: it may be stepped into a shot of the edit, or hold the edit nested
+			// in a bigger one; the master bake finds the shot's instance through its hierarchy either way.
+			TSharedPtr<ISequencer> Sequencer = Scope.Sequencer.Pin();
+			if (!Sequencer)
+			{
+				Sequencer = SequencerShowing(EditSequence);
+			}
 			if (!Sequencer)
 			{
 				if (bOpened || !EditSequence)
@@ -1317,8 +1345,9 @@ namespace BlackEyeFastBake
 					+ SHorizontalBox::Slot().FillWidth(0.7f)[ Widget ];
 			};
 
-			const FText Title = FText::Format(Target->Section.IsValid() ? LOCTEXT("ShotFromSection", "This shot: {0} (the selected section)")
-			                                                            : LOCTEXT("ShotItself", "This shot: {0}"),
+			const FText Title = FText::Format(!Target->Section.IsValid() ? LOCTEXT("ShotItself", "This shot: {0}")
+			                                  : Scope->bEntered ? LOCTEXT("ShotFromEntered", "This shot: {0} (the section you stepped in through)")
+			                                  : LOCTEXT("ShotFromSection", "This shot: {0} (the selected section)"),
 				FText::FromString(GetNameSafe(Target->Shot.Get())));
 
 			return SNew(SBorder).BorderImage(FAppStyle::GetBrush("ToolPanel.DarkGroupBorder")).Padding(8)
@@ -2081,11 +2110,19 @@ namespace BlackEyeFastBake
 		{
 			return;
 		}
-		FBakeScope Scope;
-		Scope.Edit = Focused;
-		Scope.ReturnTo = Cast<ULevelSequence>(Sequencer->GetRootMovieSceneSequence());
-		Scope.Sequencer = Sequencer;
-		Scope.Target = MakeShotTarget(Focused, {}, true);
+		// Stepped into the shot from an edit: its section, as the toolbar does (ScopeOf); else the shot itself.
+		FBakeScope Scope = ScopeOf(*Sequencer);
+		if (Scope.bEntered)
+		{
+			Scope.Target = MakeShotTarget(Scope.Edit.Get(), Scope.Selected);
+		}
+		else
+		{
+			Scope.Edit = Focused;
+			Scope.Selected.Reset();
+			Scope.bSelectedOnly = false;
+			Scope.Target = MakeShotTarget(Focused, {}, true);
+		}
 		if (Scope.Target)
 		{
 			const int32 Index = Scope.Target->Cameras.IndexOfByPredicate([&CameraName](const FShotCamera& C) { return C.Name == CameraName; });
