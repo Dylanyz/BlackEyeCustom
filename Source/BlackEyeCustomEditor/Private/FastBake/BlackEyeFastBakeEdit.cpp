@@ -1642,6 +1642,7 @@ namespace BlackEyeFastBake
 			TSharedRef<FBakeScope> Scope = MakeShared<FBakeScope>(InScope);
 			Scope->EnsureTarget();
 			bool bBake = false;
+			bool bDone = false; // closed with Done: keep the choices, bake nothing
 
 			// The summary follows the settings; the plan is re-made only when what it depends on changes.
 			struct FPlanCache { int32 Handles = INDEX_NONE; int32 Mode = INDEX_NONE; bool bSelectedOnly = false; bool bWholeShots = false; bool bSameShots = false; int32 Camera = INDEX_NONE;
@@ -1981,7 +1982,21 @@ namespace BlackEyeFastBake
 						]
 						+ SHorizontalBox::Slot().AutoWidth().Padding(4, 0)
 						[
+							SNew(SButton).Text(LOCTEXT("DoneButton", "Done"))
+							.ToolTipText(LOCTEXT("DoneTip", "Closes without baking and keeps these choices for next time, as Bake does. "
+							                                "Lock, unlock and delete already took effect when you clicked them."))
+							.OnClicked_Lambda([&bDone, WeakWindow]()
+							{
+								bDone = true;
+								if (TSharedPtr<SWindow> W = WeakWindow.Pin()) { W->RequestDestroyWindow(); }
+								return FReply::Handled();
+							})
+						]
+						+ SHorizontalBox::Slot().AutoWidth().Padding(4, 0)
+						[
 							SNew(SButton).Text(LOCTEXT("CancelButton", "Cancel"))
+							.ToolTipText(LOCTEXT("CancelTip", "Closes and forgets the choices changed here. Lock, unlock and delete already "
+							                                  "took effect (Edit > Undo reverts them)."))
 							.OnClicked_Lambda([WeakWindow]()
 							{
 								if (TSharedPtr<SWindow> W = WeakWindow.Pin()) { W->RequestDestroyWindow(); }
@@ -1992,7 +2007,11 @@ namespace BlackEyeFastBake
 				]);
 
 			FSlateApplication::Get().AddModalWindow(Window, FSlateApplication::Get().GetActiveTopLevelWindow());
-			if (bBake && Scope->Edit.IsValid())
+			if (bDone)
+			{
+				Settings->Save();
+			}
+			else if (bBake && Scope->Edit.IsValid())
 			{
 				Settings->Save();
 				StartBatch(*Scope, *Settings);

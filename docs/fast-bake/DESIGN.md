@@ -437,6 +437,10 @@ Not built yet: re-sync settings without re-baking (P2); keeping the previous bak
     reason the choice exists (the camera eases toward its subject, so where recording starts sets the cut), and
     the ways that give the same result slower (shot by shot; the twin written inside each shot) are folded under a
     collapsed "Fallback" (`SExpandableArea`, open when one is the saved choice).
+  - **Done** (*built 2026-10-08, not yet run*). Dylan, 2026-10-08: after lock / unlock / delete, or changing a
+    choice such as "Afterwards, the shots play", close and keep the choices without baking. Done saves the settings
+    exactly as Bake does (`FEditBakeSettings::Save`) and bakes nothing; Cancel forgets them. Lock, unlock and delete
+    act when clicked either way, as before.
   - **Measured on the repro (2026-10-07, tester project, `Tools/fast_bake_edit_repro.py`):**
     - Plans: Like a render [30,90) + [200,240) at 10 frames after (the overlapping uses [30,70) and [60,80) merge, the
       tail stops at 90); With handles and shot by shot [20,90) + [190,240), as before.
