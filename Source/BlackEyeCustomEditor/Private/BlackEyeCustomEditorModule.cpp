@@ -5,6 +5,7 @@
 #include "Modules/ModuleManager.h"
 #include "BlackEyeContract.h"
 #include "FastBake/BlackEyeFastBakeInternal.h"
+#include "BlackEyeSetup/BlackEyeSetupInternal.h"
 
 /**
  * `BlackEyeCustom.SelfTest` in the console checks every Black Eye symbol this plugin reaches by name
@@ -22,12 +23,14 @@ public:
 	{
 		BlackEyeFastBake::RegisterMenus();
 		BlackEyeFastBake::RegisterEditMenus();
+		BlackEyeSetup::RegisterPanel();
 	}
 
 	virtual void ShutdownModule() override
 	{
 		// A record left running would leave a world-tick delegate pointing into the unloaded module.
 		UBlackEyeFastBakeLibrary::StopRealtimeRecord(FString());
+		BlackEyeSetup::UnregisterPanel();
 		BlackEyeFastBake::UnregisterEditMenus();
 		BlackEyeFastBake::UnregisterMenus();
 	}

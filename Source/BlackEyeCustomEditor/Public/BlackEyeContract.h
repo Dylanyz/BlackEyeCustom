@@ -55,6 +55,53 @@ namespace BlackEyeContract
 	 */
 	BLACKEYECUSTOMEDITOR_API bool GetFirstSubjectPoint(const AActor* Camera, bool bLookAt, FVector& OutWorld);
 
+	// --- Black Eye Setup (docs/blackeye-setup/DESIGN.md): the switches and subjects it reads and writes ---------------
+
+	/** The camera's Follow or LookAt component (the actor's `Follow` / `LookAt` pointers), or null. */
+	BLACKEYECUSTOMEDITOR_API UObject* GetFollowComponent(const AActor* Camera);
+	BLACKEYECUSTOMEDITOR_API UObject* GetLookAtComponent(const AActor* Camera);
+
+	/** Property names the setup reads and writes, as declared in Black Eye 2.0.7 (file:line in BlackEyeContract.cpp). */
+	namespace Names
+	{
+		BLACKEYECUSTOMEDITOR_API extern const FName EnableFollow;             // Follow: bool
+		BLACKEYECUSTOMEDITOR_API extern const FName EnableLookAt;             // LookAt: bool
+		BLACKEYECUSTOMEDITOR_API extern const FName SetFocusDistance;         // LookAt: bool
+		BLACKEYECUSTOMEDITOR_API extern const FName FollowOffset;             // Follow: FVector
+		BLACKEYECUSTOMEDITOR_API extern const FName FinalOrientationMode;     // Follow: EFollowMountPivotMode
+		BLACKEYECUSTOMEDITOR_API extern const FName OrientationReferenceMode; // Follow: EFollowReferenceMode
+		BLACKEYECUSTOMEDITOR_API extern const FName UseMultipleTargets;       // Follow: bool
+		BLACKEYECUSTOMEDITOR_API extern const FName ChaseFollowMode;          // Follow: bool
+		BLACKEYECUSTOMEDITOR_API extern const FName YawOffset;                // Follow: float
+		BLACKEYECUSTOMEDITOR_API extern const FName PitchOffset;              // Follow: float
+		BLACKEYECUSTOMEDITOR_API extern const FName Target0;                  // Follow and LookAt: the first subject
+		BLACKEYECUSTOMEDITOR_API extern const FName FocusTrackingTarget;      // LookAt: FBlackEyeSimpleTarget
+	}
+
+	/** One Black Eye subject (FBlackEyeSimpleTarget or a weighted child of it), as plain values. */
+	struct FSubjectValue
+	{
+		AActor* Actor = nullptr;
+		FString Component;  // ComponentName: empty means the actor's root component
+		FString Bone;       // BoneName: a bone or socket of that component
+		float Weight = 1.f; // weighted targets only; 0 makes Black Eye ignore the subject
+		bool bHasWeight = false;
+	};
+
+	/** Reads / writes the subject struct named Prop on a Follow or LookAt component. False when it isn't one. */
+	BLACKEYECUSTOMEDITOR_API bool ReadSubject(const UObject* Component, FName Prop, FSubjectValue& Out);
+	BLACKEYECUSTOMEDITOR_API bool WriteSubject(UObject* Component, FName Prop, const FSubjectValue& Value);
+
+	/** Reflected reads and writes by name. False when the property is missing or of another type. */
+	BLACKEYECUSTOMEDITOR_API bool GetBool(const UObject* Object, FName Prop, bool& Out);
+	BLACKEYECUSTOMEDITOR_API bool SetBool(UObject* Object, FName Prop, bool bValue);
+	BLACKEYECUSTOMEDITOR_API bool GetVector(const UObject* Object, FName Prop, FVector& Out);
+	BLACKEYECUSTOMEDITOR_API bool SetVector(UObject* Object, FName Prop, const FVector& Value);
+	BLACKEYECUSTOMEDITOR_API bool GetFloat(const UObject* Object, FName Prop, double& Out);
+	/** Enums by value name ("FMPM_Manual"), so a reordered Black Eye enum still maps right. */
+	BLACKEYECUSTOMEDITOR_API bool GetEnumName(const UObject* Object, FName Prop, FString& OutValueName);
+	BLACKEYECUSTOMEDITOR_API bool SetEnumByName(UObject* Object, FName Prop, const FString& ValueName);
+
 	/** VersionName from Black_Eye.uplugin; empty when the plugin is not enabled. */
 	BLACKEYECUSTOMEDITOR_API FString GetInstalledVersion();
 

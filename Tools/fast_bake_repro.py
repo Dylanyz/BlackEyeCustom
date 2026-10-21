@@ -87,7 +87,7 @@ if "Manny" not in bindings:
 
 cam = bindings.get("BEC_A")
 if cam is None:
-    cam = lses.add_spawnable_from_class(unreal.BlackEyeCineCameraActor)
+    cam = lses.add_spawnable_from_class(seq, unreal.BlackEyeCineCameraActor)  # UE 5.8 takes the sequence first
     cam.set_name("BEC_A")
 
 # One spawnable Black Eye camera: Follow Manny, Look At his head bone. Re-applied every run (cheap, idempotent).

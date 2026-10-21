@@ -24,6 +24,9 @@ namespace
 	const FName TargetActorPropertyName(TEXT("Actor"));                              // BlackEyeSimpleTarget.h:47
 	const FName TargetComponentPropertyName(TEXT("ComponentName"));                  // BlackEyeSimpleTarget.h:50
 	const FName TargetBonePropertyName(TEXT("BoneName"));                            // BlackEyeSimpleTarget.h:59
+	const FName TargetWeightPropertyName(TEXT("Weight"));                            // BlackEyeWeightedTarget.h:25
+	const TCHAR* FollowComponentClassName = TEXT("BlackEyeFollowComponent");          // BlackEyeFollowComponent.h (the BEC's Follow)
+	const TCHAR* LookAtComponentClassName = TEXT("BlackEyeLookAtComponent");          // BlackEyeLookAtComponent.h
 
 	UScriptStruct* GetSimpleTargetStruct()
 	{
@@ -155,6 +158,140 @@ bool BlackEyeContract::GetFirstSubjectPoint(const AActor* Camera, bool bLookAt, 
 	return false;
 }
 
+// --- Black Eye Setup ---------------------------------------------------------------------------------------------------
+
+namespace BlackEyeContract::Names
+{
+	const FName EnableFollow(TEXT("bEnableFollow"));                         // BlackEyeFollowComponentBase.h:26
+	const FName EnableLookAt(TEXT("bEnableLookAt"));                         // BlackEyeLookAtComponent.h:87
+	const FName SetFocusDistance(TEXT("bSetFocusDistance"));                 // BlackEyeLookAtComponent.h:114
+	const FName FollowOffset(TEXT("FollowOffset"));                          // BlackEyeFollowComponent.h:30
+	const FName FinalOrientationMode(TEXT("FinalOrientationMode"));          // BlackEyeFollowComponentBase.h:29
+	const FName OrientationReferenceMode(TEXT("OrientationReferenceMode"));  // BlackEyeFollowComponent.h:54
+	const FName UseMultipleTargets(TEXT("bUseMultipleTargets"));             // BlackEyeFollowComponent.h:33
+	const FName ChaseFollowMode(TEXT("bChaseFollowMode"));                   // BlackEyeFollowComponent.h:27
+	const FName YawOffset(TEXT("YawOffset"));                                // BlackEyeFollowComponentBase.h:41
+	const FName PitchOffset(TEXT("PitchOffset"));                            // BlackEyeFollowComponentBase.h:44
+	const FName Target0(TEXT("Target_0"));                                   // BlackEyeFollowComponent.h:36, BlackEyeLookAtComponent.h:38
+	const FName FocusTrackingTarget(TEXT("FocusTrackingTarget"));            // BlackEyeLookAtComponent.h:120
+}
+
+namespace
+{
+	UObject* GetComponent(const AActor* Camera, FName Name)
+	{
+		const UClass* Base = BlackEyeContract::GetCameraBaseClass();
+		const FObjectPropertyBase* Prop = Base ? CastField<FObjectPropertyBase>(Base->FindPropertyByName(Name)) : nullptr;
+		return (Prop && Camera && Camera->IsA(Base)) ? Prop->GetObjectPropertyValue_InContainer(Camera) : nullptr;
+	}
+
+	template <typename PropType>
+	PropType* FindProp(const UObject* Object, FName Name)
+	{
+		return Object ? FindFProperty<PropType>(Object->GetClass(), Name) : nullptr;
+	}
+
+	const FStructProperty* FindSubjectProp(const UObject* Component, FName Name)
+	{
+		const FStructProperty* Prop = FindProp<FStructProperty>(Component, Name);
+		const UScriptStruct* TargetStruct = GetSimpleTargetStruct();
+		return (Prop && TargetStruct && Prop->Struct && Prop->Struct->IsChildOf(TargetStruct)) ? Prop : nullptr;
+	}
+}
+
+UObject* BlackEyeContract::GetFollowComponent(const AActor* Camera) { return GetComponent(Camera, FollowPropertyName); }
+UObject* BlackEyeContract::GetLookAtComponent(const AActor* Camera) { return GetComponent(Camera, LookAtPropertyName); }
+
+bool BlackEyeContract::ReadSubject(const UObject* Component, FName Name, FSubjectValue& Out)
+{
+	const FStructProperty* Prop = FindSubjectProp(Component, Name);
+	if (!Prop)
+	{
+		return false;
+	}
+	const void* Value = Prop->ContainerPtrToValuePtr<void>(Component);
+	Out = FSubjectValue();
+	Out.Actor = ReadTargetActor(Prop->Struct, Value);
+	if (const FStrProperty* P = FindFProperty<FStrProperty>(Prop->Struct, TargetComponentPropertyName)) { Out.Component = P->GetPropertyValue_InContainer(Value); }
+	if (const FStrProperty* P = FindFProperty<FStrProperty>(Prop->Struct, TargetBonePropertyName)) { Out.Bone = P->GetPropertyValue_InContainer(Value); }
+	if (const FFloatProperty* P = FindFProperty<FFloatProperty>(Prop->Struct, TargetWeightPropertyName))
+	{
+		Out.Weight = P->GetPropertyValue_InContainer(Value);
+		Out.bHasWeight = true;
+	}
+	return true;
+}
+
+bool BlackEyeContract::WriteSubject(UObject* Component, FName Name, const FSubjectValue& In)
+{
+	const FStructProperty* Prop = FindSubjectProp(Component, Name);
+	if (!Prop)
+	{
+		return false;
+	}
+	void* Value = Prop->ContainerPtrToValuePtr<void>(Component);
+	if (const FSoftObjectProperty* P = FindFProperty<FSoftObjectProperty>(Prop->Struct, TargetActorPropertyName)) { P->SetPropertyValue_InContainer(Value, FSoftObjectPtr(In.Actor)); }
+	if (const FStrProperty* P = FindFProperty<FStrProperty>(Prop->Struct, TargetComponentPropertyName)) { P->SetPropertyValue_InContainer(Value, In.Component); }
+	if (const FStrProperty* P = FindFProperty<FStrProperty>(Prop->Struct, TargetBonePropertyName)) { P->SetPropertyValue_InContainer(Value, In.Bone); }
+	if (const FFloatProperty* P = FindFProperty<FFloatProperty>(Prop->Struct, TargetWeightPropertyName)) { P->SetPropertyValue_InContainer(Value, In.Weight); }
+	return true;
+}
+
+bool BlackEyeContract::GetBool(const UObject* Object, FName Name, bool& Out)
+{
+	const FBoolProperty* P = FindProp<FBoolProperty>(Object, Name);
+	if (P) { Out = P->GetPropertyValue_InContainer(Object); }
+	return P != nullptr;
+}
+
+bool BlackEyeContract::SetBool(UObject* Object, FName Name, bool bValue)
+{
+	const FBoolProperty* P = FindProp<FBoolProperty>(Object, Name);
+	if (P) { P->SetPropertyValue_InContainer(Object, bValue); }
+	return P != nullptr;
+}
+
+bool BlackEyeContract::GetVector(const UObject* Object, FName Name, FVector& Out)
+{
+	const FStructProperty* P = FindProp<FStructProperty>(Object, Name);
+	if (!P || P->Struct != TBaseStructure<FVector>::Get()) { return false; }
+	Out = *P->ContainerPtrToValuePtr<FVector>(Object);
+	return true;
+}
+
+bool BlackEyeContract::SetVector(UObject* Object, FName Name, const FVector& Value)
+{
+	const FStructProperty* P = FindProp<FStructProperty>(Object, Name);
+	if (!P || P->Struct != TBaseStructure<FVector>::Get()) { return false; }
+	*P->ContainerPtrToValuePtr<FVector>(Object) = Value;
+	return true;
+}
+
+bool BlackEyeContract::GetFloat(const UObject* Object, FName Name, double& Out)
+{
+	if (const FFloatProperty* P = FindProp<FFloatProperty>(Object, Name)) { Out = P->GetPropertyValue_InContainer(Object); return true; }
+	if (const FDoubleProperty* P = FindProp<FDoubleProperty>(Object, Name)) { Out = P->GetPropertyValue_InContainer(Object); return true; }
+	return false;
+}
+
+bool BlackEyeContract::GetEnumName(const UObject* Object, FName Name, FString& Out)
+{
+	const FEnumProperty* P = FindProp<FEnumProperty>(Object, Name);
+	if (!P || !P->GetEnum()) { return false; }
+	const int64 Value = P->GetUnderlyingProperty()->GetSignedIntPropertyValue(P->ContainerPtrToValuePtr<void>(Object));
+	Out = P->GetEnum()->GetNameStringByValue(Value);
+	return true;
+}
+
+bool BlackEyeContract::SetEnumByName(UObject* Object, FName Name, const FString& ValueName)
+{
+	const FEnumProperty* P = FindProp<FEnumProperty>(Object, Name);
+	const int64 Value = (P && P->GetEnum()) ? P->GetEnum()->GetValueByNameString(ValueName) : INDEX_NONE;
+	if (Value == INDEX_NONE) { return false; }
+	P->GetUnderlyingProperty()->SetIntPropertyValue(P->ContainerPtrToValuePtr<void>(Object), Value);
+	return true;
+}
+
 FString BlackEyeContract::GetInstalledVersion()
 {
 	const TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindEnabledPlugin(BlackEyePluginName);
@@ -201,6 +338,42 @@ bool BlackEyeContract::RunSelfTest()
 	                           && FindFProperty<FStrProperty>(TargetStruct, TargetComponentPropertyName) != nullptr
 	                           && FindFProperty<FStrProperty>(TargetStruct, TargetBonePropertyName) != nullptr,
 	              FString::Printf(TEXT("%s.%s::Actor/ComponentName/BoneName"), BlackEyeScriptPackage, SimpleTargetStructName));
+
+	// 6. Black Eye Setup: every switch, mode and subject it writes, with the type it writes (docs/blackeye-setup).
+	const UClass* FollowClass = FindObject<UClass>(FTopLevelAssetPath(BlackEyeScriptPackage, FollowComponentClassName));
+	const UClass* LookAtClass = FindObject<UClass>(FTopLevelAssetPath(BlackEyeScriptPackage, LookAtComponentClassName));
+	auto Has = [](const UClass* Class, FName Name, const FFieldClass* Type)
+	{
+		const FProperty* Prop = Class ? Class->FindPropertyByName(Name) : nullptr;
+		return Prop && Prop->IsA(Type);
+	};
+	using namespace BlackEyeContract::Names;
+	struct FNeed { const UClass* Class; FName Name; const FFieldClass* Type; };
+	const FNeed Needs[] = {
+		{ FollowClass, EnableFollow, FBoolProperty::StaticClass() },
+		{ FollowClass, UseMultipleTargets, FBoolProperty::StaticClass() },
+		{ FollowClass, ChaseFollowMode, FBoolProperty::StaticClass() },
+		{ FollowClass, FollowOffset, FStructProperty::StaticClass() },
+		{ FollowClass, FinalOrientationMode, FEnumProperty::StaticClass() },
+		{ FollowClass, OrientationReferenceMode, FEnumProperty::StaticClass() },
+		{ FollowClass, YawOffset, FFloatProperty::StaticClass() },
+		{ FollowClass, PitchOffset, FFloatProperty::StaticClass() },
+		{ FollowClass, Target0, FStructProperty::StaticClass() },
+		{ LookAtClass, EnableLookAt, FBoolProperty::StaticClass() },
+		{ LookAtClass, SetFocusDistance, FBoolProperty::StaticClass() },
+		{ LookAtClass, Target0, FStructProperty::StaticClass() },
+		{ LookAtClass, FocusTrackingTarget, FStructProperty::StaticClass() },
+	};
+	for (const FNeed& Need : Needs)
+	{
+		bAll &= Check(6, TEXT("setup property"), Has(Need.Class, Need.Name, Need.Type),
+		              FString::Printf(TEXT("%s::%s"), Need.Class ? *Need.Class->GetName() : TEXT("(class missing)"), *Need.Name.ToString()));
+	}
+
+	// 7. The enum values the setup writes by name.
+	const UEnum* PivotEnum = FindObject<UEnum>(FTopLevelAssetPath(BlackEyeScriptPackage, TEXT("EFollowMountPivotMode"))); // BlackEyeTypes.h:24
+	bAll &= Check(7, TEXT("enum value"), PivotEnum && PivotEnum->GetValueByNameString(TEXT("FMPM_Manual")) != INDEX_NONE,
+	              TEXT("EFollowMountPivotMode::FMPM_Manual"));
 
 	UE_LOG(LogBlackEyeCustom, Display, TEXT("[BlackEyeCustom] selftest %s"), bAll ? TEXT("PASSED") : TEXT("FAILED"));
 	return bAll;

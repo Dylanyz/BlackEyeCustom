@@ -14,6 +14,7 @@ own way inside Black Eye. It is an extension, not a fork: no Black Eye code is c
 | Extension | What it fixes | Status | Design |
 |---|---|---|---|
 | **Fast Bake** | Black Eye cameras jolt into frame at every cut when an edit is played in the editor, because their damping runs on wall-clock ticks, not the playhead. Fast Bake solves each camera offline, faster than realtime, into keys on a plain CineCamera "twin" in the same shot, and locks the shot to it (or unlocks it back to the live camera). | Working: Sequencer menu, Bake Edit, Python. about 22x realtime on a minute of a production shot (2026-10-06); a locked edit plays without jolts | [docs/fast-bake/DESIGN.md](docs/fast-bake/DESIGN.md) |
+| **Black Eye Setup** | Using a Black Eye camera as a normal camera, or switching it between procedural and hand-made, needs the right Sequencer tracks for every Follow / LookAt / Focus combination, and LookAt off still drives the camera and can lock focus. Black Eye Setup gives three independent switches (Follow, LookAt, Focus), each with its subject, that also set the camera's tracks so it keeps its place and nothing fights it; plus fill-from-character (Heading socket / pelvis, tracker). | Built and measured on a repro (2026-10-21): Sequencer toolbar window, Python, console | [docs/blackeye-setup/DESIGN.md](docs/blackeye-setup/DESIGN.md) |
 
 ## For the Black Eye team
 
