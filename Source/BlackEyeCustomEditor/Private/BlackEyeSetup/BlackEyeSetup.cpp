@@ -15,6 +15,7 @@
 #include "Channels/MovieSceneBoolChannel.h"
 #include "Channels/MovieSceneChannelProxy.h"
 #include "Channels/MovieSceneDoubleChannel.h"
+#include "Channels/MovieSceneFloatChannel.h"
 #include "Channels/MovieSceneActorReferenceChannel.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Engine/TargetPoint.h"
@@ -27,17 +28,23 @@
 #include "MovieScene.h"
 #include "MovieSceneCommonHelpers.h"
 #include "MovieSceneObjectBindingID.h"
+#include "MovieSceneTimeHelpers.h"
 #include "ScopedTransaction.h"
 #include "Sections/MovieScene3DTransformSection.h"
 #include "Sections/MovieSceneActorReferenceSection.h"
 #include "Sections/MovieSceneBoolSection.h"
 #include "Sections/MovieSceneCameraCutSection.h"
+#include "Sections/MovieSceneFloatSection.h"
 #include "Sections/MovieSceneVectorSection.h"
 #include "Tracks/MovieScene3DTransformTrack.h"
 #include "Tracks/MovieSceneActorReferenceTrack.h"
 #include "Tracks/MovieSceneBoolTrack.h"
 #include "Tracks/MovieSceneCameraCutTrack.h"
+#include "Tracks/MovieSceneFloatTrack.h"
+#include "Tracks/MovieSceneSubTrack.h"
 #include "Tracks/MovieSceneVectorTrack.h"
+
+#include <type_traits>
 
 #define LOCTEXT_NAMESPACE "BlackEyeSetup"
 
@@ -211,6 +218,129 @@ namespace BlackEyeSetup
 			}
 		}
 
+		/** Where a switch takes effect: the whole shot (defaults), or from a frame on (keys). Tick times of the focused sequence. */
+		struct FWhen
+		{
+			bool bKeyed = false;
+			FFrameNumber From;  // the playhead
+			FFrameNumber Start; // the playback start: an unkeyed track keeps its old value from here to From
+		};
+
+		template <typename TrackType>
+		TrackType* FindOrAddPropertyTrack(const FCamera& Camera, UObject* LiveComponent, FName Name, const FString& Path)
+		{
+			const FGuid Binding = ComponentBinding(Camera, LiveComponent, true);
+			if (!Binding.IsValid())
+			{
+				return nullptr;
+			}
+			TrackType* Track = FindPropertyTrack<TrackType>(*Camera.MovieScene, Binding, Path);
+			if (!Track)
+			{
+				Track = Camera.MovieScene->AddTrack<TrackType>(Binding);
+				Track->SetPropertyNameAndPath(Name, Path);
+				if constexpr (std::is_same_v<TrackType, UMovieSceneDoubleVectorTrack>)
+				{
+					Track->SetNumChannelsUsed(3);
+				}
+			}
+			if (Track->GetAllSections().Num() == 0)
+			{
+				UMovieSceneSection* Section = Track->CreateNewSection();
+				Section->SetRange(TRange<FFrameNumber>::All());
+				Track->AddSection(*Section);
+			}
+			return Track;
+		}
+
+		/** Keys a bool property at When.From; an unkeyed track first keeps the old value from the playback start. */
+		void KeyBool(const FCamera& Camera, UObject* LiveComponent, FName Property, bool bOld, bool bNew, const FWhen& When)
+		{
+			UMovieSceneBoolTrack* Track = FindOrAddPropertyTrack<UMovieSceneBoolTrack>(Camera, LiveComponent, Property, Property.ToString());
+			for (UMovieSceneSection* Section : Track ? Track->GetAllSections() : TArray<UMovieSceneSection*>())
+			{
+				FMovieSceneBoolChannel* Channel = Section->GetChannelProxy().GetChannel<FMovieSceneBoolChannel>(0);
+				if (!Channel)
+				{
+					continue;
+				}
+				Section->Modify();
+				TMovieSceneChannelData<bool> Data = Channel->GetData();
+				if (Data.GetTimes().Num() == 0)
+				{
+					Data.UpdateOrAddKey(When.Start, bOld);
+				}
+				Data.UpdateOrAddKey(When.From, bNew);
+			}
+		}
+
+		/** Keys float or double channels at When.From with constant (stepped) keys, the old values kept from the start. */
+		template <typename ChannelType>
+		void KeyConstant(UMovieSceneSection& Section, int32 Count, const double* Old, const double* New, const FWhen& When)
+		{
+			const TArrayView<ChannelType*> Channels = Section.GetChannelProxy().GetChannels<ChannelType>();
+			Section.Modify();
+			for (int32 i = 0; i < Count && i < Channels.Num(); ++i)
+			{
+				auto Data = Channels[i]->GetData();
+				if (Data.GetTimes().Num() == 0)
+				{
+					Channels[i]->AddConstantKey(When.Start, Old[i]);
+				}
+				const int32 Existing = Data.FindKey(When.From);
+				if (Existing != INDEX_NONE)
+				{
+					Data.RemoveKey(Existing);
+				}
+				Channels[i]->AddConstantKey(When.From, New[i]);
+			}
+		}
+
+		void KeyFloat(const FCamera& Camera, UObject* LiveComponent, FName Name, const FString& Path, double Old, double New, const FWhen& When)
+		{
+			if (UMovieSceneFloatTrack* Track = FindOrAddPropertyTrack<UMovieSceneFloatTrack>(Camera, LiveComponent, Name, Path))
+			{
+				for (UMovieSceneSection* Section : Track->GetAllSections())
+				{
+					KeyConstant<FMovieSceneFloatChannel>(*Section, 1, &Old, &New, When);
+				}
+			}
+		}
+
+		void KeyVector(const FCamera& Camera, UObject* LiveComponent, FName Property, const FVector& Old, const FVector& New, const FWhen& When)
+		{
+			if (UMovieSceneDoubleVectorTrack* Track = FindOrAddPropertyTrack<UMovieSceneDoubleVectorTrack>(Camera, LiveComponent, Property, Property.ToString()))
+			{
+				const double OldValues[3] = { Old.X, Old.Y, Old.Z };
+				const double NewValues[3] = { New.X, New.Y, New.Z };
+				for (UMovieSceneSection* Section : Track->GetAllSections())
+				{
+					KeyConstant<FMovieSceneDoubleChannel>(*Section, 3, OldValues, NewValues, When);
+				}
+			}
+		}
+
+		/** The value a keyed bool property track gives at a time; unset when the track is missing or has no keys. */
+		TOptional<bool> KeyedBoolAt(const FCamera& Camera, UObject* LiveComponent, FName Property, FFrameNumber Time)
+		{
+			if (!LiveComponent || !Camera.Sequencer)
+			{
+				return {};
+			}
+			const UMovieSceneBoolTrack* Track = FindPropertyTrack<UMovieSceneBoolTrack>(*Camera.MovieScene,
+				Camera.Sequencer->GetHandleToObject(LiveComponent, false), Property.ToString());
+			for (UMovieSceneSection* Section : Track ? Track->GetAllSections() : TArray<UMovieSceneSection*>())
+			{
+				const FMovieSceneBoolChannel* Channel = Section->GetChannelProxy().GetChannel<FMovieSceneBoolChannel>(0);
+				bool bValue = false;
+				if (Channel && Channel->GetNumKeys() > 0 && Section->GetRange().Contains(Time) && Channel->Evaluate(FFrameTime(Time), bValue))
+				{
+					return bValue;
+				}
+			}
+			return {};
+		}
+
 		/**
 		 * The binding a reference key points at: the subject's own binding in this sequence, made if it has none. A
 		 * subject spawned by another sequence can't be referenced from here.
@@ -292,6 +422,37 @@ namespace BlackEyeSetup
 			Log.Add(FString::Printf(TEXT("%s keyed to %s"), *Path, *Label(Subject)));
 		}
 
+		/** Keys a subject reference at When.From; an unkeyed track first keeps the old subject from the playback start. */
+		void KeyReference(const FCamera& Camera, UObject* LiveComponent, const FString& Name, const FString& Path, AActor* Old, AActor* New,
+		                  const FWhen& When, FLog& Log)
+		{
+			const FGuid OldGuid = Old ? SubjectBinding(Camera, Old, Log) : FGuid();
+			const FGuid NewGuid = New ? SubjectBinding(Camera, New, Log) : FGuid();
+			UMovieSceneActorReferenceTrack* Track = (OldGuid.IsValid() && NewGuid.IsValid())
+				? FindOrAddPropertyTrack<UMovieSceneActorReferenceTrack>(Camera, LiveComponent, FName(Name), Path) : nullptr;
+			if (!Track)
+			{
+				Log.Add(FString::Printf(TEXT("warning: %s could not be keyed"), *Path));
+				return;
+			}
+			const FMovieSceneActorReferenceKey OldKey{ UE::MovieScene::FRelativeObjectBindingID(OldGuid) };
+			const FMovieSceneActorReferenceKey NewKey{ UE::MovieScene::FRelativeObjectBindingID(NewGuid) };
+			for (UMovieSceneSection* Section : Track->GetAllSections())
+			{
+				if (FMovieSceneActorReferenceChannel* Channel = Section->GetChannelProxy().GetChannel<FMovieSceneActorReferenceChannel>(0))
+				{
+					Section->Modify();
+					TMovieSceneChannelData<FMovieSceneActorReferenceKey> Data = Channel->GetData();
+					if (Data.GetTimes().Num() == 0)
+					{
+						Data.UpdateOrAddKey(When.Start, OldKey);
+					}
+					Data.UpdateOrAddKey(When.From, NewKey);
+				}
+			}
+			Log.Add(FString::Printf(TEXT("%s keyed to %s from the playhead"), *Path, *Label(New)));
+		}
+
 		/** The camera's Transform track; a spawnable gets one if it has none (renders want one: DESIGN §5). */
 		UMovieScene3DTransformTrack* TransformTrack(const FCamera& Camera, FLog& Log)
 		{
@@ -313,13 +474,28 @@ namespace BlackEyeSetup
 		 * value where they have no keys, so turning a switch off leaves the camera where it is. Scale is untouched.
 		 * BE-NATIVE: Black Eye would skip the tracks' channels its own switches drive (docs.md "Camera jitters").
 		 */
-		void ApplyTransform(const FCamera& Camera, bool bLocation, bool bRotation, FLog& Log)
+		void ApplyTransform(const FCamera& Camera, bool bLocation, bool bRotation, const FWhen& When, FLog& Log)
 		{
 			UMovieScene3DTransformTrack* Track = TransformTrack(Camera, Log);
 			const USceneComponent* Root = Camera.Live ? Camera.Live->GetRootComponent() : nullptr;
 			if (!Track || !Root)
 			{
 				return;
+			}
+			if (When.bKeyed)
+			{
+				// From the playhead: split the section there; only the part from the playhead on changes. Channel masks are
+				// per section, so this is how a switch keyed mid-shot gets its own Transform channels.
+				const FFrameRate TickRate = Camera.MovieScene->GetTickResolution();
+				for (UMovieSceneSection* Section : TArray<UMovieSceneSection*>(Track->GetAllSections()))
+				{
+					const TRange<FFrameNumber> Range = Section->GetRange();
+					const bool bInside = Range.Contains(When.From) && (!Range.HasLowerBound() || Range.GetLowerBoundValue() < When.From);
+					if (bInside && Section->SplitSection(FQualifiedFrameTime(FFrameTime(When.From), TickRate), false))
+					{
+						Log.Add(TEXT("split the Transform section at the playhead"));
+					}
+				}
 			}
 			const FVector Location = Root->GetRelativeLocation();
 			const FRotator Rotation = Root->GetRelativeRotation();
@@ -329,7 +505,8 @@ namespace BlackEyeSetup
 			for (UMovieSceneSection* Base : Track->GetAllSections())
 			{
 				UMovieScene3DTransformSection* Section = Cast<UMovieScene3DTransformSection>(Base);
-				if (!Section)
+				const TRange<FFrameNumber> Range = Section ? Section->GetRange() : TRange<FFrameNumber>::Empty();
+				if (!Section || (When.bKeyed && (!Range.HasLowerBound() || Range.GetLowerBoundValue() < When.From)))
 				{
 					continue;
 				}
@@ -522,6 +699,8 @@ namespace BlackEyeSetup
 			{
 				Character->GetComponents(Meshes);
 			}
+			// The body first, as for Follow: a MetaHuman's Face also has a head bone, but the body drives it.
+			Meshes.StableSort([](const USkeletalMeshComponent& A, const USkeletalMeshComponent& B) { return A.GetName() == TEXT("Body") && B.GetName() != TEXT("Body"); });
 			for (const TCHAR* Bone : HeadBones)
 			{
 				for (USkeletalMeshComponent* Mesh : Meshes)
@@ -748,8 +927,11 @@ namespace BlackEyeSetup
 		}
 		if (!Chosen.IsValid())
 		{
-			OutError = Name.IsEmpty() ? FString(TEXT("this sequence has no Black Eye camera"))
-			                          : FString::Printf(TEXT("no Black Eye camera named %s in this sequence"), *Name);
+			// An edit holds its cameras in its shots: say how to get to them.
+			const bool bHasShots = AsConst(*MovieScene).GetTracks().ContainsByPredicate([](const UMovieSceneTrack* T) { return T && T->IsA<UMovieSceneSubTrack>(); });
+			OutError = !Name.IsEmpty() ? FString::Printf(TEXT("no Black Eye camera named %s in this sequence"), *Name)
+				: bHasShots ? FString(TEXT("no Black Eye camera in this sequence itself; double-click a shot to step into it"))
+				: FString(TEXT("this sequence has no Black Eye camera"));
 			return false;
 		}
 
@@ -775,7 +957,9 @@ namespace BlackEyeSetup
 	FBlackEyeSetupState ReadState(const FCamera& Camera)
 	{
 		FBlackEyeSetupState State;
-		const AActor* Setup = Camera.Setup;
+		// What the camera is at the playhead: the live copy, which Sequencer has evaluated (keyed switches and subject
+		// references included). Its setup only when nothing is spawned.
+		const AActor* Setup = Camera.Live ? Camera.Live : Camera.Setup;
 		if (!Setup)
 		{
 			State.Message = TEXT("no camera");
@@ -826,33 +1010,24 @@ namespace BlackEyeSetup
 			State.FocusSubject.Actor = Cine->FocusSettings.TrackingFocusSettings.ActorToTrack.Get();
 		}
 
-		// Keyed switches decide themselves, whatever the setup says.
-		for (const TPair<UObject*, FName>& Pair : { TPair<UObject*, FName>(GetFollowComponent(Camera.Live), Names::EnableFollow),
-		                                             TPair<UObject*, FName>(GetLookAtComponent(Camera.Live), Names::EnableLookAt) })
+		// A keyed switch is what its keys say at the playhead, whatever the setup's default is.
+		const FFrameNumber Now = Camera.Sequencer ? Camera.Sequencer->GetLocalTime().Time.FloorToFrame() : FFrameNumber();
+		if (const TOptional<bool> Keyed = KeyedBoolAt(Camera, GetFollowComponent(Camera.Live), Names::EnableFollow, Now))
 		{
-			if (!Pair.Key || !Camera.Sequencer)
-			{
-				continue;
-			}
-			const FGuid Component = Camera.Sequencer->GetHandleToObject(Pair.Key, false);
-			if (const UMovieSceneBoolTrack* Track = FindPropertyTrack<UMovieSceneBoolTrack>(*Camera.MovieScene, Component, Pair.Value.ToString()))
-			{
-				for (UMovieSceneSection* Section : Track->GetAllSections())
-				{
-					const FMovieSceneBoolChannel* Channel = Section->GetChannelProxy().GetChannel<FMovieSceneBoolChannel>(0);
-					if (Channel && Channel->GetNumKeys() > 0)
-					{
-						State.Warnings.Add(FString::Printf(TEXT("%s is keyed in the sequence; the keys decide it during playback"), *Pair.Value.ToString()));
-					}
-				}
-			}
+			State.bFollow = *Keyed;
+			State.Warnings.Add(TEXT("Follow is keyed: it shows the value at the playhead, and switching it keys it there"));
+		}
+		if (const TOptional<bool> Keyed = KeyedBoolAt(Camera, GetLookAtComponent(Camera.Live), Names::EnableLookAt, Now))
+		{
+			State.bLookAt = *Keyed;
+			State.Warnings.Add(TEXT("LookAt is keyed: it shows the value at the playhead, and switching it keys it there"));
 		}
 		return State;
 	}
 
 	// --- Switches ---------------------------------------------------------------------------------------------------------
 
-	FString SetSwitch(const FCamera& Camera, EBlackEyeSetupSwitch Switch, bool bOn)
+	FString SetSwitch(const FCamera& Camera, EBlackEyeSetupSwitch Switch, bool bOn, bool bFromPlayhead)
 	{
 		FLog Log;
 		const FBlackEyeSetupState Before = ReadState(Camera);
@@ -862,6 +1037,28 @@ namespace BlackEyeSetup
 			return TEXT("error: not a CineCamera");
 		}
 		const FTransform LensWorld = LiveLens->GetComponentTransform();
+
+		// Whole shot (defaults), or from the playhead on (keys). A switch already keyed is always keyed at the playhead:
+		// a default can't beat its keys.
+		FWhen When;
+		When.Start = UE::MovieScene::DiscreteInclusiveLower(Camera.MovieScene->GetPlaybackRange());
+		When.From = Camera.Sequencer->GetLocalTime().Time.FloorToFrame();
+		const bool bAlreadyKeyed =
+			(Switch == EBlackEyeSetupSwitch::Follow && KeyedBoolAt(Camera, GetFollowComponent(Camera.Live), Names::EnableFollow, When.From).IsSet()) ||
+			(Switch == EBlackEyeSetupSwitch::LookAt && KeyedBoolAt(Camera, GetLookAtComponent(Camera.Live), Names::EnableLookAt, When.From).IsSet());
+		if (Switch == EBlackEyeSetupSwitch::Focus && bFromPlayhead)
+		{
+			// CineCameraSettings.h:239 (UE 5.8.3): FocusMethod isn't Interp, so Sequencer can't key it.
+			return TEXT("error: Focus switches for the whole shot only (the lens's Focus Method can't be keyed); to change focus mid-shot, "
+			            "switch the Focus subject from the playhead");
+		}
+		When.bKeyed = (bFromPlayhead || bAlreadyKeyed) && When.From > When.Start;
+		if (bFromPlayhead && !When.bKeyed)
+		{
+			Log.Add(TEXT("note: the playhead is at the shot's start, so this applies to the whole shot"));
+		}
+		const bool bTemplateFollow = ReadSwitch(Camera.Setup, true);
+		const bool bTemplateLookAt = ReadSwitch(Camera.Setup, false);
 
 		const FScopedTransaction Transaction(FText::Format(LOCTEXT("SetSwitch", "Black Eye Setup: {0} {1}"),
 			FText::FromString(SwitchName(Switch)), bOn ? LOCTEXT("On", "on") : LOCTEXT("Off", "off")));
@@ -886,11 +1083,34 @@ namespace BlackEyeSetup
 			{
 				Offset = Frame.InverseTransformPositionNoScale(Camera.Live->GetActorLocation());
 			}
+			FVector OldOffset = FVector::ZeroVector;
+			GetVector(GetFollowComponent(Camera.Setup), Names::FollowOffset, OldOffset);
 			EditBoth(Camera, [&](AActor& Actor, bool bSetup)
 			{
 				UObject* Follow = GetFollowComponent(&Actor);
 				ModifyIf(Follow, bSetup);
+				if (When.bKeyed && bSetup)
+				{
+					// Keyed from the playhead: the keys carry the switch, its weight and offset; the setup keeps the shot's
+					// start. Only the orientation mode below is the setup's (it matters only while Follow runs).
+					if (bOn && !bLookAt)
+					{
+						SetEnumByName(Follow, Names::FinalOrientationMode, TEXT("FMPM_Manual"));
+					}
+					return;
+				}
 				SetBool(Follow, Names::EnableFollow, bOn);
+				// A freshly spawned camera snaps Follow once even while it is off: the snap flag set in the constructor
+				// (BlackEyeFollowComponentBase.cpp:44) bypasses bEnableFollow (:160-164). Measured 2026-10-21: with Follow
+				// off the spawned camera sat at its Follow position until a scrub put it back on its track. Weight 0 makes
+				// the subject invalid (BlackEyeWeightedTarget.h:33-35), so the snap has nothing to move to; the subject stays.
+				// BE-NATIVE: skip the spawn snap while Follow is off (BlackEyeFollowComponentBase.cpp:160-164).
+				FSubjectValue Subject;
+				if (ReadSubject(Follow, Names::Target0, Subject) && Subject.Actor && Subject.bHasWeight)
+				{
+					Subject.Weight = bOn ? 1.f : 0.f;
+					WriteSubject(Follow, Names::Target0, Subject);
+				}
 				if (bSolved)
 				{
 					SetVector(Follow, Names::FollowOffset, Offset);
@@ -902,10 +1122,27 @@ namespace BlackEyeSetup
 				}
 			});
 			UObject* LiveFollow = GetFollowComponent(Camera.Live);
-			SetBoolTrackDefault(Camera, LiveFollow, Names::EnableFollow, bOn, Log);
+			if (When.bKeyed)
+			{
+				KeyBool(Camera, LiveFollow, Names::EnableFollow, bTemplateFollow, bOn, When);
+				KeyFloat(Camera, LiveFollow, TEXT("Weight"), TEXT("Target_0.Weight"), bTemplateFollow ? 1.0 : 0.0, bOn ? 1.0 : 0.0, When);
+				if (bSolved)
+				{
+					KeyVector(Camera, LiveFollow, Names::FollowOffset, OldOffset, Offset, When);
+				}
+				Log.Add(FString::Printf(TEXT("Follow keyed %s from the playhead (with its subject weight%s)"), bOn ? TEXT("on") : TEXT("off"),
+					bSolved ? TEXT(" and Follow Offset") : TEXT("")));
+			}
+			else
+			{
+				SetBoolTrackDefault(Camera, LiveFollow, Names::EnableFollow, bOn, Log);
+				if (bSolved)
+				{
+					SetVectorTrackDefault(Camera, LiveFollow, Names::FollowOffset, Offset, Log);
+				}
+			}
 			if (bSolved)
 			{
-				SetVectorTrackDefault(Camera, LiveFollow, Names::FollowOffset, Offset, Log);
 				Log.Add(FString::Printf(TEXT("Follow Offset measured from where the camera is: %s"), *Offset.ToCompactString()));
 			}
 			else if (bOn)
@@ -937,7 +1174,10 @@ namespace BlackEyeSetup
 			{
 				UObject* LookAt = GetLookAtComponent(&Actor);
 				ModifyIf(LookAt, bSetup);
-				SetBool(LookAt, Names::EnableLookAt, bOn);
+				if (!(When.bKeyed && bSetup))
+				{
+					SetBool(LookAt, Names::EnableLookAt, bOn); // keyed: the key carries it, the setup keeps the shot's start
+				}
 				// Black Eye's own focus locks for good with LookAt off (skill ref lookat-off-focus.md); the Focus switch
 				// uses the lens's Tracking focus instead, so Black Eye never writes focus.
 				SetBool(LookAt, Names::SetFocusDistance, false);
@@ -973,7 +1213,15 @@ namespace BlackEyeSetup
 				}
 			});
 			UObject* LiveLookAt = GetLookAtComponent(Camera.Live);
-			SetBoolTrackDefault(Camera, LiveLookAt, Names::EnableLookAt, bOn, Log);
+			if (When.bKeyed)
+			{
+				KeyBool(Camera, LiveLookAt, Names::EnableLookAt, bTemplateLookAt, bOn, When);
+				Log.Add(FString::Printf(TEXT("LookAt keyed %s from the playhead"), bOn ? TEXT("on") : TEXT("off")));
+			}
+			else
+			{
+				SetBoolTrackDefault(Camera, LiveLookAt, Names::EnableLookAt, bOn, Log);
+			}
 			if (bOn)
 			{
 				SetReferenceTrack(Camera, LiveLookAt, TEXT("Actor"), TEXT("Target_0.Actor"), Before.LookAtSubject.Actor, Log);
@@ -1042,10 +1290,11 @@ namespace BlackEyeSetup
 
 		// The Transform track drives what no switch drives.
 		const bool bManual = IsPivotManual(Camera.Setup);
-		ApplyTransform(Camera, !bFollow, !bLookAt && (!bFollow || bManual), Log);
+		ApplyTransform(Camera, !bFollow, !bLookAt && (!bFollow || bManual), When, Log);
 
 		Changed(Camera);
-		Log.Lines.Insert(FString::Printf(TEXT("%s %s on %s"), SwitchName(Switch), bOn ? TEXT("on") : TEXT("off"), *Camera.Name), 0);
+		Log.Lines.Insert(FString::Printf(TEXT("%s %s on %s%s"), SwitchName(Switch), bOn ? TEXT("on") : TEXT("off"), *Camera.Name,
+			When.bKeyed ? TEXT(", from the playhead") : TEXT("")), 0);
 		return Log.Join();
 	}
 
@@ -1099,6 +1348,10 @@ namespace BlackEyeSetup
 		else
 		{
 			const bool bFollow = Switch == EBlackEyeSetupSwitch::Follow;
+			if (bFollow && !ReadState(Camera).bFollow)
+			{
+				Value.Weight = 0.f; // Follow is off: keep the spawn snap away (see SetSwitch, Follow)
+			}
 			EditBoth(Camera, [&](AActor& Actor, bool bSetup)
 			{
 				UObject* Component = bFollow ? GetFollowComponent(&Actor) : GetLookAtComponent(&Actor);
@@ -1115,6 +1368,65 @@ namespace BlackEyeSetup
 			Where += FString::Printf(TEXT(" > %s > %s"), Subject.Component.IsEmpty() ? TEXT("root") : *Subject.Component, *Subject.Bone);
 		}
 		Log.Lines.Insert(FString::Printf(TEXT("%s subject: %s"), SwitchName(Switch), *Where), 0);
+		return Log.Join();
+	}
+
+	FString SetSubjectFromPlayhead(const FCamera& Camera, EBlackEyeSetupSwitch Switch, const FBlackEyeSetupSubject& Subject)
+	{
+		FWhen When;
+		When.Start = UE::MovieScene::DiscreteInclusiveLower(Camera.MovieScene->GetPlaybackRange());
+		When.From = Camera.Sequencer->GetLocalTime().Time.FloorToFrame();
+		When.bKeyed = true;
+		const FBlackEyeSetupState Before = ReadState(Camera);
+		const FBlackEyeSetupSubject& Old = Switch == EBlackEyeSetupSwitch::Follow ? Before.FollowSubject
+		                                 : Switch == EBlackEyeSetupSwitch::LookAt ? Before.LookAtSubject : Before.FocusSubject;
+		if (!Subject.Actor)
+		{
+			return TEXT("error: no subject");
+		}
+		if (When.From <= When.Start || !Old.Actor)
+		{
+			return SetSubject(Camera, Switch, Subject) + TEXT("\nnote: applied to the whole shot (the playhead is at its start, or there was no subject before)");
+		}
+		// Only the actor can be keyed: Component Name and Bone Name are plain strings (BlackEyeSimpleTarget.h:50, :59), and the
+		// lens tracks actors only. BE-NATIVE: keyable component/bone, or one subject reference per key.
+		if (Switch == EBlackEyeSetupSwitch::Focus ? !Subject.Bone.IsEmpty() : (Old.Component != Subject.Component || Old.Bone != Subject.Bone))
+		{
+			return Switch == EBlackEyeSetupSwitch::Focus
+				? FString(TEXT("error: focus from the playhead needs an actor subject (a tracker), not a bone"))
+				: FString::Printf(TEXT("error: from the playhead the new subject must use the same component and bone as the old one (%s > %s): "
+				                       "Black Eye can't key them. Trackers for trackers, or the same socket on the same rig"),
+				                  Old.Component.IsEmpty() ? TEXT("root") : *Old.Component, Old.Bone.IsEmpty() ? TEXT("-") : *Old.Bone);
+		}
+
+		FLog Log;
+		const FScopedTransaction Transaction(FText::Format(LOCTEXT("SetSubjectHere", "Black Eye Setup: {0} subject from the playhead"),
+			FText::FromString(SwitchName(Switch))));
+		Camera.Sequence->Modify();
+		Camera.MovieScene->Modify();
+		if (Switch == EBlackEyeSetupSwitch::Focus)
+		{
+			UCineCameraComponent* LiveLens = Lens(Camera.Live);
+			KeyReference(Camera, LiveLens, FocusActorPropertyName, FocusActorPropertyPath, Old.Actor, Subject.Actor, When, Log);
+			if (LiveLens)
+			{
+				LiveLens->FocusSettings.TrackingFocusSettings.ActorToTrack = Subject.Actor.Get(); // the view, now
+			}
+		}
+		else
+		{
+			UObject* LiveComponent = Switch == EBlackEyeSetupSwitch::Follow ? GetFollowComponent(Camera.Live) : GetLookAtComponent(Camera.Live);
+			KeyReference(Camera, LiveComponent, TEXT("Actor"), TEXT("Target_0.Actor"), Old.Actor, Subject.Actor, When, Log);
+			FSubjectValue Live;
+			if (ReadSubject(LiveComponent, Names::Target0, Live))
+			{
+				Live.Actor = Subject.Actor; // the view, now
+				WriteSubject(LiveComponent, Names::Target0, Live);
+			}
+		}
+		Changed(Camera);
+		Log.Lines.Insert(FString::Printf(TEXT("%s subject: %s from the playhead (before it: %s)"), SwitchName(Switch), *Label(Subject.Actor),
+			*Label(Old.Actor)), 0);
 		return Log.Join();
 	}
 
@@ -1210,19 +1522,24 @@ FBlackEyeSetupState UBlackEyeSetupLibrary::GetSetupState(ULevelSequence* Sequenc
 	return BlackEyeSetup::ReadState(Camera);
 }
 
-FString UBlackEyeSetupLibrary::SetSetupSwitch(ULevelSequence* Sequence, const FString& CameraBindingName, EBlackEyeSetupSwitch Switch, bool bOn)
+FString UBlackEyeSetupLibrary::SetSetupSwitch(ULevelSequence* Sequence, const FString& CameraBindingName, EBlackEyeSetupSwitch Switch, bool bOn,
+                                              bool bFromPlayhead)
 {
 	BlackEyeSetup::FCamera Camera;
 	FString Error;
-	return CameraFor(Sequence, CameraBindingName, Camera, Error) ? BlackEyeSetup::SetSwitch(Camera, Switch, bOn) : TEXT("error: ") + Error;
+	return CameraFor(Sequence, CameraBindingName, Camera, Error) ? BlackEyeSetup::SetSwitch(Camera, Switch, bOn, bFromPlayhead) : TEXT("error: ") + Error;
 }
 
 FString UBlackEyeSetupLibrary::SetSetupSubject(ULevelSequence* Sequence, const FString& CameraBindingName, EBlackEyeSetupSwitch Switch,
-                                               const FBlackEyeSetupSubject& Subject)
+                                               const FBlackEyeSetupSubject& Subject, bool bFromPlayhead)
 {
 	BlackEyeSetup::FCamera Camera;
 	FString Error;
-	return CameraFor(Sequence, CameraBindingName, Camera, Error) ? BlackEyeSetup::SetSubject(Camera, Switch, Subject) : TEXT("error: ") + Error;
+	if (!CameraFor(Sequence, CameraBindingName, Camera, Error))
+	{
+		return TEXT("error: ") + Error;
+	}
+	return bFromPlayhead ? BlackEyeSetup::SetSubjectFromPlayhead(Camera, Switch, Subject) : BlackEyeSetup::SetSubject(Camera, Switch, Subject);
 }
 
 FString UBlackEyeSetupLibrary::AutofillSetup(ULevelSequence* Sequence, const FString& CameraBindingName, AActor* Character)

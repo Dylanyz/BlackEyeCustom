@@ -142,6 +142,17 @@ namespace BlackEyeSetup
 							[ SNew(STextBlock).Text_Lambda([this]() { return FText::FromString(State.bValid ? State.CameraBindingName : FString(TEXT("(none)"))); }) ]
 						]
 					]
+					+ SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 6)
+					[
+						SNew(SCheckBox)
+						.IsChecked_Lambda([this]() { return bFromPlayhead ? ECheckBoxState::Checked : ECheckBoxState::Unchecked; })
+						.OnCheckStateChanged_Lambda([this](ECheckBoxState NewState) { bFromPlayhead = NewState == ECheckBoxState::Checked; })
+						.ToolTipText(LOCTEXT("FromPlayheadTip", "Off: a switch or subject applies to the whole shot.\nOn: from the playhead on only. "
+						                                        "Follow and LookAt are keyed there and the Transform section is split there; a subject "
+						                                        "is keyed there (same component and bone as before, e.g. tracker to tracker). Focus "
+						                                        "on/off is always the whole shot: the lens's Focus Method can't be keyed."))
+						[ SNew(STextBlock).Text(LOCTEXT("FromPlayhead", "From the playhead on (keyed)")) ]
+					]
 					+ SVerticalBox::Slot().AutoHeight()[ Row(EBlackEyeSetupSwitch::Follow, LOCTEXT("Follow", "Follow"),
 						LOCTEXT("FollowTip", "On: the camera follows its subject (Follow Offset measured from where it is now; the Transform track's "
 						                     "Location is switched off).\nOff: the camera stays put and its position is yours (Transform track Location).")) ]
@@ -196,7 +207,11 @@ namespace BlackEyeSetup
 	private:
 		TWeakPtr<ISequencer> Sequencer;
 		FString CameraName;               // empty until picked: FindCamera's own choice
+		bool bFromPlayhead = false;       // switches and subjects apply from the playhead on (keyed), not to the whole shot
+		// Only values, never the subject actors: a level change or a deleted actor would leave the window drawing a
+		// destroyed object (it crashed so, 2026-10-21). Refresh turns the actors into text and drops them.
 		FBlackEyeSetupState State;
+		FString SubjectText[3];
 		FString Status;
 		TArray<TSharedPtr<FString>> CameraNames;
 		TSharedPtr<SComboBox<TSharedPtr<FString>>> CameraCombo;
@@ -234,6 +249,12 @@ namespace BlackEyeSetup
 			{
 				State = ReadState(Camera);
 			}
+			FBlackEyeSetupSubject* Subjects[3] = { &State.FollowSubject, &State.LookAtSubject, &State.FocusSubject };
+			for (int32 i = 0; i < 3; ++i)
+			{
+				SubjectText[i] = State.bValid ? Describe(*Subjects[i]) : FString();
+				Subjects[i]->Actor = nullptr;
+			}
 		}
 
 		void Run(TFunction<FString(const FCamera&)> Action)
@@ -263,9 +284,9 @@ namespace BlackEyeSetup
 			return Switch == EBlackEyeSetupSwitch::Follow ? State.bFollow : Switch == EBlackEyeSetupSwitch::LookAt ? State.bLookAt : State.bFocus;
 		}
 
-		const FBlackEyeSetupSubject& SubjectOf(EBlackEyeSetupSwitch Switch) const
+		const FString& SubjectOf(EBlackEyeSetupSwitch Switch) const
 		{
-			return Switch == EBlackEyeSetupSwitch::Follow ? State.FollowSubject : Switch == EBlackEyeSetupSwitch::LookAt ? State.LookAtSubject : State.FocusSubject;
+			return SubjectText[static_cast<int32>(Switch)];
 		}
 
 		TSharedRef<SWidget> Row(EBlackEyeSetupSwitch Switch, const FText& Name, const FText& Tip)
@@ -290,7 +311,8 @@ namespace BlackEyeSetup
 						.OnCheckStateChanged_Lambda([this, Switch](ECheckBoxState NewState)
 						{
 							const bool bOn = NewState == ECheckBoxState::Checked;
-							Run([Switch, bOn](const FCamera& Camera) { return SetSwitch(Camera, Switch, bOn); });
+							const bool bHere = bFromPlayhead;
+							Run([Switch, bOn, bHere](const FCamera& Camera) { return SetSwitch(Camera, Switch, bOn, bHere); });
 						})
 						[
 							SNew(SBox).HAlign(HAlign_Center).MinDesiredWidth(56.f).Padding(FMargin(2, 1))
@@ -299,7 +321,7 @@ namespace BlackEyeSetup
 					]
 				]
 				+ SHorizontalBox::Slot().FillWidth(1.f).VAlign(VAlign_Center)
-				[ SNew(STextBlock).Text_Lambda([this, Switch]() { return FText::FromString(Describe(SubjectOf(Switch))); }) ]
+				[ SNew(STextBlock).Text_Lambda([this, Switch]() { return FText::FromString(SubjectOf(Switch)); }) ]
 				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(8, 0, 0, 0)
 				[
 					SNew(SButton)
@@ -309,7 +331,8 @@ namespace BlackEyeSetup
 					.IsEnabled_Lambda([this]() { return State.bValid; })
 					.OnClicked_Lambda([this, Switch]()
 					{
-						Run([Switch](const FCamera& Camera)
+						const bool bHere = bFromPlayhead;
+						Run([Switch, bHere](const FCamera& Camera)
 						{
 							AActor* Actor = SelectedActor();
 							if (!Actor)
@@ -318,7 +341,7 @@ namespace BlackEyeSetup
 							}
 							FString Note;
 							const FBlackEyeSetupSubject Subject = SubjectFromActor(Switch, Actor, Note);
-							const FString Result = SetSubject(Camera, Switch, Subject);
+							const FString Result = bHere ? SetSubjectFromPlayhead(Camera, Switch, Subject) : SetSubject(Camera, Switch, Subject);
 							return Note.IsEmpty() ? Result : Result + TEXT("\nnote: ") + Note;
 						});
 						return FReply::Handled();
@@ -349,7 +372,7 @@ namespace BlackEyeSetup
 			TSharedPtr<SBlackEyeSetupPanel> Panel;
 			const TSharedRef<SWindow> Window = SNew(SWindow)
 				.Title(LOCTEXT("Title", "Black Eye Setup"))
-				.ClientSize(FVector2D(560, 330))
+				.ClientSize(FVector2D(600, 360))
 				.SupportsMaximize(false)
 				.SupportsMinimize(false)
 				[ SAssignNew(Panel, SBlackEyeSetupPanel, Sequencer) ];
@@ -430,6 +453,20 @@ namespace BlackEyeSetup
 				}
 				const bool bOn = FCString::Atoi(*Args[1]) != 0;
 				WithCamera(Args.IsValidIndex(2) ? Args[2] : FString(), [Switch, bOn](const FCamera& Camera) { return SetSwitch(Camera, Switch, bOn); });
+			}));
+
+		FAutoConsoleCommand GSwitchHere(TEXT("BlackEyeCustom.Setup.SwitchHere"),
+			TEXT("<Follow|LookAt> <0|1> [Camera]: turn a switch on or off from the playhead on (keyed)."),
+			FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString>& Args)
+			{
+				EBlackEyeSetupSwitch Switch;
+				if (Args.Num() < 2 || !ParseSwitch(Args[0], Switch))
+				{
+					LogResult(TEXT("error: usage BlackEyeCustom.Setup.SwitchHere <Follow|LookAt> <0|1> [Camera]"));
+					return;
+				}
+				const bool bOn = FCString::Atoi(*Args[1]) != 0;
+				WithCamera(Args.IsValidIndex(2) ? Args[2] : FString(), [Switch, bOn](const FCamera& Camera) { return SetSwitch(Camera, Switch, bOn, true); });
 			}));
 
 		FAutoConsoleCommand GFill(TEXT("BlackEyeCustom.Setup.Fill"), TEXT("[Camera]: fill the subjects from the character selected in the level."),

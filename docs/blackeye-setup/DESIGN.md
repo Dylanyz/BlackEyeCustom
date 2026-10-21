@@ -14,6 +14,7 @@ reproduced here.
 | [2. What it does](#2-what-it-does) | built, measured on the repro 2026-10-21 |
 | [3. Which camera](#3-which-camera) | built |
 | [4. The switches, rule by rule](#4-the-switches-rule-by-rule) | built, measured on the repro 2026-10-21 |
+| [4a. From the playhead](#4a-from-the-playhead) | built, measured on the repro 2026-10-21 |
 | [5. Tracks](#5-tracks) | built, measured |
 | [6. Subjects and fill from character](#6-subjects-and-fill-from-character) | built, measured on the repro |
 | [7. Undo](#7-undo) | built, measured |
@@ -55,6 +56,7 @@ Sequencer toolbar → **Black Eye Setup** (beside Bake Edit) opens a small windo
   so the camera keeps its place when switched and nothing fights it.
 - **A subject per switch**, with **Use Selected** (the actor selected in the level).
 - **Fill all from selected character**: Follow its `Heading` socket (else pelvis), LookAt and Focus its tracker.
+- **From the playhead on (keyed)**: switches and subjects change from the playhead on only (§4a); off, the whole shot.
 - A status line saying what each action changed, and warnings (keyed switches, weight 0).
 
 | Switch | On | Off |
@@ -64,7 +66,8 @@ Sequencer toolbar → **Black Eye Setup** (beside Bake Edit) opens a small windo
 | Focus | lens Tracking focus on the subject, every frame | manual focus, held at the current distance |
 
 Also: `UBlackEyeSetupLibrary` (`GetSetupState`, `SetSetupSwitch`, `SetSetupSubject`, `AutofillSetup`) and console
-commands `BlackEyeCustom.Setup.Open | State | Switch <Follow|LookAt|Focus> <0|1> [Camera] | Fill [Camera]`. Every action
+commands `BlackEyeCustom.Setup.Open | State | Switch <Follow|LookAt|Focus> <0|1> [Camera] | SwitchHere <Follow|LookAt> <0|1>
+[Camera] | Fill [Camera]`. Every action
 is one undo step.
 
 ## 3. Which camera
@@ -94,7 +97,13 @@ set to Manual so Follow moves the camera without turning it (the rotation stays 
 BE-NATIVE: `GetTargetTransform` exposed, or the Details path's re-solve made an explicit, keyable-safe action.
 
 **Follow off.** `bEnableFollow` false. Follow returns early (`BlackEyeFollowComponentBase.cpp:160-164`), so the root
-stays where it is; the Transform track's Location takes over with the current location as its value.
+stays where it is; the Transform track's Location takes over with the current location as its value. The Follow
+subject's weight goes to 0 (back to 1 when Follow comes on): a freshly spawned camera snaps Follow once even while it is
+off, because the snap flag set in the constructor (`BlackEyeFollowComponentBase.cpp:44`) bypasses `bEnableFollow`
+(`:160-164`). Measured: with Follow off, a respawned camera sat at its Follow position (266, -723) until a scrub put it
+back on its track (-400, -400); with weight 0 the subject is invalid (`BlackEyeWeightedTarget.h:33-35`), the snap has
+nothing to move to, and the respawned camera stayed on its track. The subject itself is kept.
+BE-NATIVE: skip the spawn snap while Follow is off.
 
 **LookAt on.** Needs a subject; a subject weight of 0 is set to 1 (weight 0 makes Black Eye ignore the subject,
 `BlackEyeWeightedTarget.h:33-35`, which silently froze aim and focus in production).
@@ -117,6 +126,27 @@ BE-NATIVE: run the focus block whether or not pointing runs (`BlackEyeLookUtils.
 **Focus off.** Manual focus at the distance the lens has now. The lens works out `CurrentFocusDistance` only when
 something views it (`CineCameraComponent.cpp:595`), so the setup resolves it first (`GetCameraView`, as Fast Bake does,
 trap 4.19 there); without that it read 0 and held 0 (measured 2026-10-21).
+
+## 4a. From the playhead
+
+*Status: built, measured on the repro 2026-10-21 (§11).*
+
+The window's **From the playhead on (keyed)** box (library `bFromPlayhead`, console `BlackEyeCustom.Setup.SwitchHere`):
+
+- **Follow / LookAt:** the switch is keyed at the playhead (an unkeyed track first keeps the old value from the playback
+  start). Follow also keys its subject weight (§4) and, when on, its measured Follow Offset, with constant keys. The
+  Transform section is split at the playhead (`UMovieSceneSection::SplitSection`) and only the part from the playhead on
+  changes its channels, since channel masks are per section. The setup itself keeps the shot's start.
+- **A switch that is already keyed is always switched at the playhead**, whatever the box says: a default can't beat
+  its keys. The window shows a keyed switch's value at the playhead (the live copy, which Sequencer evaluated).
+- **Subjects:** the subject reference is keyed at the playhead; the subject before it stays. Only the actor can be keyed:
+  Component Name and Bone Name are plain strings (`BlackEyeSimpleTarget.h:50`, `:59`), so the new subject must use the
+  same component and bone (tracker to tracker; the same socket on the same rig), else it is refused with that reason.
+- **Focus on/off is whole-shot only:** the lens's `FocusMethod` isn't `Interp` (`CineCameraSettings.h:239`), so it
+  can't be keyed. Focus *subject* changes from the playhead work (`ActorToTrack` is keyable, `:215`).
+- Follow on from the playhead: Black Eye treats the subject becoming valid as a new target and starts from where the
+  camera is (`BlackEyeFollowComponent.cpp` "so the camera doesn't jump", in TickFollow), and the offset was measured
+  from there, so the switch doesn't jump (measured).
 
 ## 5. Tracks
 
@@ -172,7 +202,10 @@ template change (`SequencerUtilities.cpp:5657-5661`). The respawned camera start
 3. **Quitting the editor with a sequence open in Sequencer crashed in shutdown** (access violation in
    PropertyEditor under Sequencer, twice, before and with this extension loaded); closing the sequence first
    (`LevelSequenceEditorBlueprintLibrary.close_level_sequence`) quit cleanly.
-4. **Synthetic (computer-use) clicks did not reach the window's buttons** (or any Slate widget that session; hover
+4. **A Black Eye camera snaps Follow once on spawn even with Follow off** (§4, Follow off).
+5. **The window must not hold actor pointers.** It kept the state struct with its subject actors between refreshes;
+   a level change destroyed them and the next paint crashed in `Describe` (2026-10-21). It now keeps only text.
+6. **Synthetic (computer-use) clicks did not reach the window's buttons** (or any Slate widget that session; hover
    tooltips showed). The actions were tested through the library and console commands, which the buttons call.
 
 ## 9. What becomes trivial inside Black Eye
@@ -192,8 +225,8 @@ template change (`SequencerUtilities.cpp:5657-5661`). The respawned camera start
   state. Cost: no bone targets (trackers instead).
 - **Channel masks, not muting the Transform track.** Muting loses hand keys for the channels the user still needs
   (position with Follow off, aim with LookAt off). Masks keep keys and the track (renders want it).
-- **Whole shot, not keyed per range.** A switch applies to the camera for the whole shot. Mid-shot switching
-  (split sections, keyed switches) is open (§12).
+- **Whole shot by default, keyed from the playhead on request** (§4a). Whole-shot edits defaults and leaves keys alone;
+  the playhead mode keys and splits. Rejected: always keying (a shot set up once would fill with keys).
 - **Separate extension from Fast Bake**, same module (Dylan, 2026-10-20: "another module beside fastbake, this one
   focused on blackeyeSetup").
 
@@ -214,12 +247,20 @@ Manny's head; MDR_58_tester, UE 5.8.3, Black Eye 2.0.7, 2026-10-21. Camera lens 
 | Fill from Manny | Follow → `SkeletalMeshComponent0 > pelvis` (no Heading socket), LookAt / Focus → tracker; switches unchanged |
 | References | all three cleared on the spawned copy, restored by one evaluation |
 | Undo of LookAt off | template restored; spawned copy respawned (root rotation back to the template's) |
+| Follow off, then respawn | before the weight fix: snapped to its Follow spot (266, -723) until a scrub; after: stayed on its track (-400, -400) |
+| Follow off from f150 (keyed) | f120 still followed Manny; f190 held exactly the f150 spot (266.17, -722.82) |
+| LookAt off from f200 (keyed) | f230 aim held at 60.83 deg; f170 LookAt still aiming |
+| Follow on from f250 (keyed) | no jump at f250; f280 followed Manny, aim unchanged |
+| LookAt subject to tracker_b from f100 | f80 aimed at Manny's tracker (0.00 deg off), f150 at tracker_b (0.00 deg off) |
+| Window open across two level loads | no crash (after the fix in §8.5) |
+| Movie render (6 frames, all on; and LookAt off) | subjects kept in the render world: Manny framed in every frame |
 | Self-test | 20 checks ok (7 new) |
 
 ## 12. Open
 
 - Click test of the window by hand (synthetic clicks didn't reach it, §8.4).
-- Mid-shot switching: split the Transform section at the playhead and key the switch, as one action.
-- A movie render of a set-up shot (references and Tracking focus in the render world) — the reference restore is
-  measured in the editor only.
-- Possessable (level) camera path and the Heading-socket fill path: built, to be measured.
+- Movie render of a shot with keyed switches (measured in the editor only).
+- Focus on/off mid-shot: needs a keyable focus method; a workaround would key `ManualFocusDistance` and switch the
+  lens's Tracking subject, not done.
+- Possessable (level) camera and Heading-socket fill paths: measured once each (fill, LookAt off, Focus on; no
+  reference tracks for a level camera).

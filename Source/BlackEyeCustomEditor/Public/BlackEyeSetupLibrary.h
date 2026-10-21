@@ -71,14 +71,21 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Black Eye|Setup")
 	static FBlackEyeSetupState GetSetupState(ULevelSequence* Sequence, const FString& CameraBindingName);
 
-	/** Turns one switch on or off and sets the tracks it needs. Returns what changed, one line each. */
+	/**
+	 * Turns one switch on or off and sets the tracks it needs. Returns what changed, one line each. bFromPlayhead (Follow,
+	 * LookAt): from the playhead on only, keyed, the Transform section split there; a switch already keyed is always keyed.
+	 */
 	UFUNCTION(BlueprintCallable, Category = "Black Eye|Setup")
-	static FString SetSetupSwitch(ULevelSequence* Sequence, const FString& CameraBindingName, EBlackEyeSetupSwitch Switch, bool bOn);
+	static FString SetSetupSwitch(ULevelSequence* Sequence, const FString& CameraBindingName, EBlackEyeSetupSwitch Switch, bool bOn,
+	                              bool bFromPlayhead = false);
 
-	/** Sets one switch's subject (and the reference tracks a spawnable camera needs for it). */
+	/**
+	 * Sets one switch's subject (and the reference tracks a spawnable camera needs for it). bFromPlayhead: the subject
+	 * reference is keyed at the playhead and the old subject stays before it (same component and bone only).
+	 */
 	UFUNCTION(BlueprintCallable, Category = "Black Eye|Setup")
 	static FString SetSetupSubject(ULevelSequence* Sequence, const FString& CameraBindingName, EBlackEyeSetupSwitch Switch,
-	                               const FBlackEyeSetupSubject& Subject);
+	                               const FBlackEyeSetupSubject& Subject, bool bFromPlayhead = false);
 
 	/**
 	 * Fills all three subjects from one character: Follow its `Heading` socket (else its pelvis bone), LookAt and Focus

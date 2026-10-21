@@ -1,4 +1,13 @@
-# Status and handoff (read first when picking up Fast Bake)
+# Status and handoff
+
+## Black Eye Setup (2026-10-21)
+
+Built overnight 2026-10-20/21 and measured on the tester repro (`/Game/Claude/BlackEyeSetup/`, built by
+`Tools/fast_bake_repro.py --folder /Game/Claude/BlackEyeSetup`, plus a TargetPoint `tracker_manny` attached to Manny's
+head). Everything in `docs/blackeye-setup/DESIGN.md`; §11 measured, §12 open. Not done: a click test of the window by
+hand (synthetic clicks never reached Slate that night) and a production try in a film (with Dylan's say-so).
+
+# Fast Bake (read first when picking up Fast Bake)
 
 Last updated 2026-10-07. The design and every measured number are in `docs/fast-bake/DESIGN.md`; this file says where
 things stand and what to do next.
