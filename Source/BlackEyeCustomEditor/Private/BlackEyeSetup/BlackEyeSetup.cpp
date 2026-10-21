@@ -778,7 +778,10 @@ namespace BlackEyeSetup
 		public:
 			virtual bool MatchesContext(const FTransactionContext& Context, const TArray<TPair<UObject*, FTransactionObjectEvent>>&) const override
 			{
-				return Context.Title.ToString().StartsWith(TEXT("Black Eye Setup"));
+				// The plugin's own steps, and a script's wrapper around them (mdr_tools' blackeye.setup verb titles its
+				// transaction "MDR blackeye.setup <run>"; the plugin's steps nest inside it).
+				const FString Title = Context.Title.ToString();
+				return Title.StartsWith(TEXT("Black Eye Setup")) || Title.Contains(TEXT("blackeye.setup"));
 			}
 			virtual void PostUndo(bool bSuccess) override { Respawn(); }
 			virtual void PostRedo(bool bSuccess) override { Respawn(); }

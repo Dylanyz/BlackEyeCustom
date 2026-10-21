@@ -187,7 +187,7 @@ The window's **From the playhead on (keyed)** box (library `bFromPlayhead`, cons
 
 Each action is one transaction. Undo restores the template and tracks, but the spawned copy (edited without
 `Modify`, §4) kept the undone state, even after scrubbing (measured 2026-10-21). An undo client (titles starting
-"Black Eye Setup") respawns every spawned BEC of the open sequences after undo / redo, as Sequencer does after a
+"Black Eye Setup", or containing "blackeye.setup": the mdr_tools verb that wraps these steps) respawns every spawned BEC of the open sequences after undo / redo, as Sequencer does after a
 template change (`SequencerUtilities.cpp:5657-5661`). The respawned camera starts with a snap
 (`BlackEyeFollowComponentBase.cpp:44`). Measured: after undo the root rotation returned to the template's.
 
