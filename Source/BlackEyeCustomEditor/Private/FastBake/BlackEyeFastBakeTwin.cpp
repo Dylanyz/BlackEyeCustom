@@ -196,8 +196,14 @@ namespace BlackEyeFastBake
 				It->CopyCompleteValue_InContainer(To, From);
 			}
 		}
-		// The keys drive focus; a tracked actor would fight them.
-		To->FocusSettings.FocusMethod = ECameraFocusMethod::Manual;
+		// The keys drive focus; a tracked actor would fight them. The keys are the camera's resolved focus distance,
+		// already smoothed, so the twin doesn't smooth again (DESIGN trap 4.19). A camera with focus Disabled or
+		// Do Not Override keeps that method: its keys are then unused, and forcing Manual would add depth of field.
+		if (From->FocusSettings.FocusMethod == ECameraFocusMethod::Manual || From->FocusSettings.FocusMethod == ECameraFocusMethod::Tracking)
+		{
+			To->FocusSettings.FocusMethod = ECameraFocusMethod::Manual;
+			To->FocusSettings.bSmoothFocusChanges = false;
+		}
 		To->FocusSettings.TrackingFocusSettings.ActorToTrack = nullptr;
 	}
 

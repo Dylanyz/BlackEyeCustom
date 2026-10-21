@@ -13,7 +13,7 @@ reproduced here; the files cited ship with each product's source.
 | [1. The problem and its root cause](#1-the-problem-and-its-root-cause) | confirmed from source |
 | [2. What already exists, and why none of it fits](#2-what-already-exists-and-why-none-of-it-fits) | confirmed from source |
 | [3. The algorithm](#3-the-algorithm) | built |
-| [4. Traps](#4-traps) | 4.11-4.18 measured; 4.1 and 4.4 confirmed; the rest from source and review |
+| [4. Traps](#4-traps) | 4.11-4.20 measured; 4.1 and 4.4 confirmed; the rest from source and review |
 | [5. Output: the baked twin, lock and unlock](#5-output-the-baked-twin-lock-and-unlock) | built, measured on a production edit |
 | [6. Entry points](#6-entry-points) | library, Sequencer menu and Bake Edit built (Bake Edit measured on the repro 2026-10-07); Bake Edit from the master, shot controls and the one window built and measured on the repro 2026-10-07; folder batch is P2 |
 | [7. What becomes trivial inside Black Eye](#7-what-becomes-trivial-inside-black-eye) | planned |
@@ -106,10 +106,10 @@ Per angle-shot Level Sequence, per BEC binding:
    1. Advance `GFrameCounter` (each step is one engine frame, trap 4.18). Evaluate with HasJumped (at the sub-frame
       time, status Stopped whatever Sequencer is doing), then constraints.
    2. Refresh only the **subject** skeletal meshes: those of each subject actor and of every actor up its attach
-      chain (trap 4.14), parents first (trap 4.6). Re-place socket-attached children. Evaluate constraints again.
+      chain (trap 4.14), and of the Tracking focus target (trap 4.20), parents first (trap 4.6). Re-place socket-attached children. Evaluate constraints again.
    3. `BEC->Tick(dt)`: the virtual `AActor::Tick`, whose BEC override runs Follow then LookAt. Then the camera
       actor's own ticking components, in tick-group order, as a world tick would run them (trap 4.13).
-   4. Sample the camera **component** world transform, `CurrentFocalLength`, `FocusSettings.ManualFocusDistance` and
+   4. Resolve the lens (`GetCameraView`, trap 4.19). Sample the camera **component** world transform, `CurrentFocalLength`, `CurrentFocusDistance` and
       `CurrentAperture` into arrays.
 5. **Write keys** onto the baked twin (§5), in one transaction (trap 4.8).
 6. **Restore** the tick, camera-cut handling and playhead; `ForceEvaluate`.
@@ -119,7 +119,8 @@ Per angle-shot Level Sequence, per BEC binding:
 - The camera *component* world transform, not the actor's: LookAt moves the mount and camera components, not just
   the actor root.
 - `CurrentFocalLength`: Dynamic FoV writes it through `SetFieldOfView`.
-- `ManualFocusDistance`: `bSetFocusDistance` is on by default.
+- `CurrentFocusDistance`, not `ManualFocusDistance`: the focus the lens resolved, whichever drives it (Black Eye's
+  `bSetFocusDistance`, on by default, writes `ManualFocusDistance`; engine Tracking focus never does). Trap 4.19.
 - Aperture is static, but copy it.
 
 **Black Eye is reached without linking it** (`Source/BlackEyeCustomEditor/Public/BlackEyeContract.h`): BECs are
@@ -243,6 +244,25 @@ needs no symbol because `Tick` is virtual on `AActor`. Every name used is checke
     loop (`CommandletHelpers::TickEngine`, `Commandlet.cpp:144`; `HighResScreenshotBeginFrame`, `UnrealClient.cpp:1604`;
     `DefaultGameMoviePlayer.cpp:538`). Neither Sequencer's runtime nor Black Eye 2.0.7 reads `GFrameCounter`.
     `BlackEyeCustom.FastBake.Debug 64` switches it off for comparison.
+19. **Measured (2026-10-13): Tracking focus baked as a constant.** A production camera had Black Eye's Set Focus
+    Distance off and the engine's Tracking focus on (`ActorToTrack` keyed to a `TargetPoint`). The bake sampled
+    `FocusSettings.ManualFocusDistance`, which Tracking never writes, so every key held the stale 10.03 cm and the twin,
+    forced to Manual, rendered out of focus. The focus a frame uses is `CurrentFocusDistance`, computed only in
+    `UpdateCameraLens` via `GetCameraView` (`CineCameraComponent.cpp:593-599, 737-751`, UE 5.8.2), which nothing calls
+    during the bake. Fix: `RefreshLens` calls `GetCameraView(StepDt)` after each step's camera tick (once per step,
+    as a world frame does, so focus smoothing advances at the same rate) and the bake samples `CurrentFocusDistance`;
+    Black Eye 2.0.7 does the same before its own Linked Camera copy (`BlackEyeUtilities.cpp:348`,
+    `BlackEyeCineCameraActorBase.cpp:233`). The twin turns smoothing off (the keys are already smoothed) and keeps a
+    Disable / Do Not Override method instead of forcing Manual. Side effect checked: `UCameraComponent::GetCameraView`
+    only rotates the component for XR, a controlled pawn, or the CineCameraActor's own LookAt tracking in the same frame
+    (`CameraComponent.cpp:420-444`), none of which applies to a Black Eye camera.
+20. **Measured (2026-10-14): the focus target must be posed too.** The same camera had Follow and LookAt off, so it had
+    no subjects and the subjects-only refresh posed no mesh at all. Its Tracking focus target, a tracker on a
+    MetaHuman Face's `FACIAL_L_Eye`, stayed wherever the pre-bake playhead had left the face: 4.6 cm baked where
+    playback resolves 42.5 cm (`GetCameraView` on the live camera at the same frame). A target 20 m away hid the same
+    error. Fix: `GatherMeshes` adds `TrackingFocusSettings.ActorToTrack` (Tracking only, read each step after
+    evaluation, since Sequencer keys it) to the subjects, so its attach chain is posed like any LookAt subject (4.14).
+    Black Eye's own `FocusTrackingTarget` is a Simple Target, so `GetSubjectActors` already includes it.
 
 ## 5. Output: the baked twin, lock and unlock
 
@@ -280,8 +300,8 @@ again by a binding tag (`BlackEyeFastBake_<BEC guid>`).
   idempotent, and its overscan guard has no feedback to undo on a plain CineCamera. Measured: twin and live camera
   agree on focal 30 mm, filmback 23.0 x 18.66, overscan 0.08 at runtime.
 - Keys on every frame, auto-tangent cubic: actor Transform (= the BEC camera component's world transform, rotation
-  unwound), and on the twin's camera-component binding `CurrentFocalLength`, `FocusSettings.ManualFocusDistance`,
-  `CurrentAperture`. Measured: twin playback equals the baked samples to 0.0000 at every frame checked.
+  unwound), and on the twin's camera-component binding `CurrentFocalLength`, `FocusSettings.ManualFocusDistance`
+  (from the sampled `CurrentFocusDistance`, trap 4.19), `CurrentAperture`. Measured: twin playback equals the baked samples to 0.0000 at every frame checked.
 - Bake info (date, range, sub-steps, warm-up, Black Eye version, components copied) lives in the twin template's
   actor Tags, so it undoes with the keys. Package metadata isn't transacted in 5.8.
 

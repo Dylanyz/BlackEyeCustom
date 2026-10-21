@@ -56,7 +56,8 @@ namespace BlackEyeFastBake
 		// The camera component, not the actor: LookAt moves the mount and camera components under the root.
 		S.CameraWorld = Cam->GetComponentToWorld();
 		S.FocalLength = Cam->CurrentFocalLength;
-		S.FocusDistance = Cam->FocusSettings.ManualFocusDistance;
+		// The resolved distance (Manual, Black Eye's Set Focus Distance or Tracking), as RefreshLens left it (trap 4.19).
+		S.FocusDistance = Cam->CurrentFocusDistance;
 		S.Aperture = Cam->CurrentAperture;
 		BlackEyeContract::GetFirstSubjectPoint(Camera, true, S.Subject);
 		BlackEyeContract::GetFirstSubjectPoint(Camera, false, S.FollowSubject);
@@ -224,6 +225,19 @@ namespace BlackEyeFastBake
 		}
 	}
 
+	/**
+	 * Resolves the lens as a rendered frame does, so CurrentFocusDistance holds this step's focus (DESIGN trap 4.19).
+	 * UCineCameraComponent only computes it in UpdateCameraLens, reached through GetCameraView
+	 * (CineCameraComponent.cpp:593-599, 737-751); Tracking focus never touches ManualFocusDistance. Called once per
+	 * step with the step's dt, as a world frame calls it, so focus smoothing advances at the same rate.
+	 * Black Eye 2.0.7 does the same before copying CurrentFocusDistance (BlackEyeUtilities.cpp:348).
+	 */
+	void RefreshLens(ACineCameraActor* Camera, float Dt)
+	{
+		FMinimalViewInfo View;
+		Camera->GetCineCameraComponent()->GetCameraView(Dt, View);
+	}
+
 	int32 AttachDepth(const USceneComponent* Component)
 	{
 		int32 Depth = 0;
@@ -242,6 +256,13 @@ namespace BlackEyeFastBake
 		{
 			TArray<AActor*> Subjects;
 			BlackEyeContract::GetSubjectActors(Camera, Subjects);
+			// The engine's Tracking focus target is a subject too: its position is the focus distance (trap 4.20).
+			// Read every step, after evaluation, since Sequencer can key it.
+			const FCameraFocusSettings& Focus = Camera->GetCineCameraComponent()->FocusSettings;
+			if (Focus.FocusMethod == ECameraFocusMethod::Tracking && Focus.TrackingFocusSettings.ActorToTrack.Get())
+			{
+				Subjects.AddUnique(Focus.TrackingFocusSettings.ActorToTrack.Get());
+			}
 			// A subject is often a tracker attached to a character's bone (a MetaHuman Face's FACIAL_L_Eye), so the
 			// meshes to pose are those of every actor up its attach chain, not just its own.
 			TSet<AActor*> Owners;
@@ -557,6 +578,7 @@ FBlackEyeFastBakeReport BlackEyeFastBake::RunBakeIn(const FBakeTarget& Target, U
 		{
 			TickCameraComponents(Camera, StepDt);
 		}
+		RefreshLens(Camera, StepDt);
 		TTick += FPlatformTime::Seconds() - T;
 	};
 
@@ -583,6 +605,7 @@ FBlackEyeFastBakeReport BlackEyeFastBake::RunBakeIn(const FBakeTarget& Target, U
 			{
 				Camera->Tick(StepDt);
 				TickCameraComponents(Camera, StepDt);
+				RefreshLens(Camera, StepDt);
 			}
 			TTick += FPlatformTime::Seconds() - TSettle;
 		}
@@ -674,6 +697,8 @@ bool UBlackEyeFastBakeLibrary::StartRealtimeRecord(ULevelSequence* Sequence, con
 		ACineCameraActor* Cam = FindCamera(*Seq, *MovieScene, Seq->GetFocusedTemplateID(), FString(), Binding);
 		if (Cam && Cam->GetWorld() == World)
 		{
+			// Nothing else resolves the lens unless a viewport looks through this camera.
+			RefreshLens(Cam, World->GetDeltaSeconds());
 			RecordSamples.Add(Sample(Cam, Seq->GetLocalTime().ConvertTo(MovieScene->GetDisplayRate()).AsDecimal()));
 		}
 	});
