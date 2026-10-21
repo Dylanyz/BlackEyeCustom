@@ -94,6 +94,22 @@ Three places give the whole picture:
 5. For Bake Edit, `Tools/fast_bake_edit_repro.py` adds an edit and a nested edit over the shot; its docstring gives
    the frames each should key.
 
+## Using Black Eye Setup
+
+Open a shot in Sequencer (a master edit: step into the shot), put the playhead inside it, and click **Black Eye
+Setup** on the Sequencer toolbar. The window works on one Black Eye camera of that shot (picked from the selection,
+the camera cut, or the Camera list):
+
+- **Follow / LookAt / Focus**: ON or OFF, each on its own. Each switch also sets the camera's tracks, and the camera
+  stays where it is when you switch. Off, Follow leaves the position and LookAt the aim to the Transform track; Focus
+  off holds the current focus distance.
+- **Use Selected**: the actor selected in the level becomes that switch's subject (a character gives its `Heading`
+  socket or pelvis for Follow, its tracker or head for LookAt and Focus). **Fill all from selected character** does
+  all three.
+- **From the playhead on (keyed)**: switches and subjects change from the playhead on instead of for the whole shot.
+- Every action is one undo step. Python: `unreal.BlackEyeSetupLibrary` (`get_setup_state`, `set_setup_switch`,
+  `set_setup_subject`, `autofill_setup`); console: `BlackEyeCustom.Setup.*`. Details: `docs/blackeye-setup/DESIGN.md`.
+
 ## Requirements
 
 - Unreal Engine 5.8, Win64, editor only.
