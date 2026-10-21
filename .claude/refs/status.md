@@ -56,4 +56,8 @@ things stand and what to do next.
 
 1. P2: Content Browser batch over a shots folder; stale flag (BEC tracks or subject sections changed since the bake);
    re-sync camera settings without re-baking.
-2. Speed (P3, only if needed): shared subject pass across angles (DESIGN §9).
+2. **Bake only what isn't baked yet** (Dylan, 2026-10-21: wanted, not now): a Bake Edit scope that skips the frames each
+   shot camera's twin already has keys for, so a master bakes just the new cuts / shots. The "rebake what changed"
+   options (rebake affected cameras; stale flag) were proposed in the 2026-10-08 session "Bake panel options and
+   implementations", not built.
+3. Speed (P3, only if needed): shared subject pass across angles (DESIGN §9).
