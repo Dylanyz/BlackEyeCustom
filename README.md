@@ -9,79 +9,115 @@ Each extension solves a problem we hit in production, and is written to be read:
 rests on and the traps found along the way are all in the repo, so the Black Eye developers can rebuild it their
 own way inside Black Eye. It is an extension, not a fork: no Black Eye code is copied or patched.
 
-## Extensions
+## Two modules
 
-| Extension | What it fixes | Status | Design |
+| Module | What it's for | Where you find it | Design |
 |---|---|---|---|
-| **Fast Bake** | Black Eye cameras jolt into frame at every cut when an edit is played in the editor, because their damping runs on wall-clock ticks, not the playhead. Fast Bake solves each camera offline, faster than realtime, into keys on a plain CineCamera "twin" in the same shot, and locks the shot to it (or unlocks it back to the live camera). | Working: Sequencer menu, Bake Edit, Python. about 22x realtime on a minute of a production shot (2026-10-06); a locked edit plays without jolts | [docs/fast-bake/DESIGN.md](docs/fast-bake/DESIGN.md) |
-| **Black Eye Setup** | Using a Black Eye camera as a normal camera, or switching it between procedural and hand-made, needs the right Sequencer tracks for every Follow / LookAt / Focus combination, and LookAt off still drives the camera and can lock focus. Black Eye Setup gives three independent switches (Follow, LookAt, Focus), each with its subject, that also set the camera's tracks so it keeps its place and nothing fights it; plus fill-from-character (Heading socket / pelvis, tracker). | Built and measured on a repro (2026-10-21): Sequencer toolbar window, Python, console | [docs/blackeye-setup/DESIGN.md](docs/blackeye-setup/DESIGN.md) |
+| **[Black Eye Bake](#black-eye-bake)** | Records Black Eye cameras into plain keyed "twin" cameras, so an edit plays and renders the same way every time, with no camera jolting into frame at the cuts. | Sequencer toolbar **Bake Edit**; a camera's right-click menu; Content Browser | [docs/fast-bake/DESIGN.md](docs/fast-bake/DESIGN.md) |
+| **[Black Eye Setup](#black-eye-setup)** | Three switches (Follow, LookAt, Focus) that set a Black Eye camera *and* its Sequencer tracks, so it works like a normal camera when a switch is off and nothing fights it. | Sequencer toolbar **Black Eye Setup** | [docs/blackeye-setup/DESIGN.md](docs/blackeye-setup/DESIGN.md) |
 
-## For the Black Eye team
+Both live in one editor module (`BlackEyeCustomEditor`), each in its own folder under `Source/.../Private/`
+(`FastBake/`, `BlackEyeSetup/`). In the code, console and menus Black Eye Bake is called **Fast Bake**.
 
-Three places give the whole picture:
+---
 
-1. **`docs/<extension>/DESIGN.md`**: the problem, its root cause cited to Black Eye and engine source by `file:line`
-   (pinned to Black Eye 2.0.7 / UE 5.8.2), the algorithm, every trap, rejected ideas with reasons, measured numbers,
-   and a section on what becomes trivial inside Black Eye.
-2. **`grep -rn BE-NATIVE Source/`**: every workaround carries a `// BE-NATIVE: <native alternative> (<file:line>)`
-   comment. Together they are the port checklist.
-3. **`Source/BlackEyeCustomEditor/Public/BlackEyeContract.h`**: every Black Eye class, function and property this
-   plugin uses. It reaches Black Eye through reflection rather than linking it, so this one file is the whole
-   dependency surface. The `BlackEyeCustom.SelfTest` console command checks each entry.
+## Black Eye Bake
 
-## Using Fast Bake
+**The problem.** A Black Eye camera eases toward its subject (damping), and that easing runs on the editor's clock,
+not the playhead. Play a full shot and it looks right; play an edit that cuts between shots and each camera starts
+in the wrong place and jolts into frame. You can't judge the cut in the editor.
 
-- **One window, many ways in:** right-click a Black Eye camera's binding > **Black Eye Fast Bake** > **Bake...** (that
-  camera picked, lock on); **Bake Edit** on the Sequencer toolbar of any sequence; or right-click one or several Level
-  Sequences in the Content Browser > **Black Eye: Bake...** (edits where they show each shot, shots at full length).
-  A bake writes `<camera>_Bake` (or a new `_Bake2`...) and can make the shot's camera cuts play it. Every action is one
-  undo step.
-- **Bake an edit:** open an edit (a sequence cutting between shots on a Cinematic Shot track) and click **Bake Edit**
-  on the Sequencer toolbar, or right-click the edit in the Content Browser > **Black Eye: Bake Edit...**. Every Black
-  Eye camera the edit shows is baked on only the frames the edit uses, one twin per camera. **Select shot sections
-  first** to bake only those. Nested edits are followed; a shot's own Sub tracks (its scene) are not. The window asks:
-  - **How to bake.** A Black Eye camera eases toward its subject, so the choice is what it's doing at each cut. Both
-    stay in the edit and play each shot inside it (nothing is reopened). *Like a render* starts every cut with the
-    camera settled on its subject, as a render does, plus extra frames after each cut: pick it once the cut is set.
-    *With handles* also bakes frames before each cut, so cuts can move earlier without a re-bake, but the camera is
-    already moving at the cut. Folded under *Fallback*: *Shot by shot* (the original way), the same result as With
-    handles, opens each shot alone and then reopens the edit (minutes on a big one).
-  - **The twin.** *Keys only* or keys and camera setup (after changing the camera's lens, filmback or components);
-    keep frames baked for other edits or replace them all. Folded under *Fallback*: written *directly* as data, or
-    *inside each shot* through Sequencer (the original way), the same result, slower.
-  - **Afterwards the shots play** the bake everywhere, the bake only on the frames baked (the camera cut is split
-    there; the rest stays live Black Eye), or the live camera.
-  - **Done** closes without baking and keeps the window's choices for next time, as Bake does; Cancel forgets them.
-    Lock, unlock and delete take effect when clicked.
-  - **This shot** (when one shot section is selected, or a shot is open with nothing selected): pick its Black Eye
-    camera (the one on the camera cut by default) and its bake camera, or **Create new +** for another one beside it;
-    **Lock** / **Unlock** / **Delete** act at once, for just the selected section or the whole shot (Delete always
-    removes the whole bake camera, after asking).
-  - **Shots** (an edit, several selected sections, several sequences): every shot camera with what it plays now,
-    Lock / Unlock / Delete per shot and **Lock all / Unlock all / Delete all**. With sections selected, **Only what's
-    selected** limits lock and unlock to the frames they show.
-  - **Selected sections / Their shots, every use / Their whole shots / Whole edit:** *Their shots, every use* bakes
-    the selected sections' shots wherever the edit cuts to them, on only the frames shown: select one section of a
-    shot to bake that shot everywhere in the master. *Their whole shots* bakes each selected section's shot at
-    full length, as if it were open on its own, still from the master. Stepping into a shot from the edit counts as
-    selecting the section you stepped in through.
+**What it does.** It plays each camera offline, frame by frame, faster than realtime (about 22-24x on production
+shots), and writes what it saw as keys on a plain CineCamera beside it: the **twin** (`<camera>_Bake`). Then the
+shot's camera cut can play the twin instead of the live Black Eye camera (**lock**), or go back to it (**unlock**).
+A locked shot plays and renders the same every time. The Black Eye camera is never changed, so you can unlock,
+adjust it and bake again.
 
-  Content Browser, on one or several sequences: **Black Eye: Lock Bakes**, **Unlock Bakes**, **Delete Bakes...**.
+### Baking from inside a shot
 
-  Console: `BlackEyeCustom.FastBake.BakeEdit [handles] [warmup] [keep 0|1] [lock 0|1|2] [selected 0|1|2|3] [mode 0|1|2]
-  [direct 0|1] [setup 0|1]` (selected 2: the whole shots, 3: their shots, every use), `BlackEyeCustom.FastBake.EditPlan [handles] [selected 0|1|2|3] [mode 0|1|2]`.
-- **From Python:** `unreal.BlackEyeFastBakeLibrary.bake_shot(sequence, options)` (options: `camera_binding_name`,
+![The Bake window opened from inside a shot](docs/images/bake-in-a-shot.png)
+
+Open a shot (or step into it from an edit) and click **Bake Edit** on the Sequencer toolbar, or right-click the Black
+Eye camera's binding > **Black Eye Fast Bake** > **Bake...**. The top of the window is about **this shot**:
+
+- **Black Eye camera**: which camera to bake (the one on the camera cut by default).
+- **Bake camera**: which twin to write into, or **Create new +** for another one beside it (to keep an older bake).
+- **Lock / Unlock / Delete** act at once. *Only this section* limits lock and unlock to the section you came in
+  through; Delete always removes the whole twin, after asking.
+- **Now plays** says what the camera cut plays right now: the live Black Eye camera, or a bake.
+
+### Baking an edit or master
+
+![The Bake window opened in a master edit, with its list of shots](docs/images/bake-in-a-master.webp)
+
+In an edit (a sequence cutting between shots on a Cinematic Shot track) **Bake Edit** bakes every Black Eye camera the
+edit shows, **only on the frames the edit uses**, straight from the edit: nothing is reopened. The top of the window
+lists the **shots** with what each plays now, and Lock / Unlock / Delete per shot or for all of them.
+
+What gets baked, when shot sections are selected first:
+
+| Choice | Bakes |
+|---|---|
+| **Selected sections** | only the frames those sections show |
+| **Their shots, every use** | those shots wherever the edit cuts to them (select one section to bake that shot everywhere) |
+| **Their whole shots** | those shots at full length, still from the edit |
+| **Whole edit** | everything the edit shows |
+
+Stepping into a shot from the edit counts as selecting the section you stepped in through. Nested edits are followed;
+a shot's own scene sub-tracks are not. From the Content Browser, right-click one or several sequences >
+**Black Eye: Bake...** (each edit where it shows its shots, each shot at full length), and **Lock / Unlock / Delete
+Bakes** for all their shots.
+
+### The choices, in plain terms
+
+**How to bake.** The camera eases toward its subject, so what it is doing at a cut depends on where recording
+started.
+
+- **Like a render** (pick this once the cut is set): every cut starts with the camera already settled on its subject,
+  exactly like a final render. *Extra frames after each cut* bakes a few more frames past each cut's end.
+- **With handles** (pick this while still cutting): also bakes frames before each cut, so you can move a cut earlier
+  without baking again. The catch: recording starts at the handle, so at the cut the camera is already moving, not
+  settled like the render.
+- *Warm-up* is how many frames are played (not keyed) before recording, so the damping settles.
+
+**The twin.**
+
+- **Keys only** (usual): only the motion and lens keys change. **Keys and camera setup**: also copies the camera's
+  lens, filmback and extra components again; pick it after changing any of those on the Black Eye camera.
+- **Keep other baked frames** (usual): a shot used in several edits has one twin, and frames baked for the other
+  edits stay. **Replace them all**: the twin keeps only this bake (a clean slate).
+
+**Afterwards, the shots play:**
+
+- **The bake, everywhere (lock)**: each shot's camera cut plays its twin.
+- **The bake only where baked**: only the baked frames play the twin; the camera cut is split there and the rest of
+  the shot stays the live Black Eye camera.
+- **The live Black Eye camera (don't lock)**: the twins are written but not used until you lock them.
+
+**Bake** bakes and closes. **Done** closes without baking and keeps the window's choices for next time. **Cancel**
+forgets them. Lock, unlock and delete take effect as soon as you click them.
+
+**Fallback (same result, slower)**, folded away in the window: *Shot by shot* opens each shot on its own and reopens
+the edit afterwards (on a big master the reopen can freeze the editor for minutes), and *Write it inside each shot*
+writes the twin through Sequencer instead of as data. They exist for comparison and as a way out if the direct path
+ever misbehaves.
+
+### Good to know
+
+- Between baked ranges, and outside them, the twin interpolates between the nearest keys. Bake the whole shot
+  before relying on a lock everywhere.
+- It needs the editor with a level viewport (Black Eye's LookAt reads it); nothing headless.
+- Every action is one undo step.
+- **Python:** `unreal.BlackEyeFastBakeLibrary.bake_shot(sequence, options)` (options: `camera_binding_name`,
   `start_frame`, `end_frame`, `ranges`, `warm_up_frames`, `settle_each_range`, `keep_other_keys`, `sub_steps`,
-  `lock_after_bake`, `lock_baked_frames_only`),
-  `get_edit_bake_plan(edit, handle_frames)` or `get_sections_bake_plan(sections, handle_frames)` (each entry's `ranges` go straight into `options.ranges`),
+  `lock_after_bake`, `lock_baked_frames_only`); `get_edit_bake_plan(edit, handle_frames)` and
+  `get_sections_bake_plan(sections, handle_frames)` (each entry's `ranges` go straight into `options.ranges`);
   `set_locked(sequence, name, bool)`, `delete_bakes(sequence, name)`, `get_bake_info(sequence)`.
-- A frame range bakes only that range; outside it, and between baked ranges, the twin interpolates between the
-  nearest keys. Bake the whole shot (the
-  default) before relying on a lock everywhere. Starting mid-shot, give `warm_up_frames` (a few seconds) so the damping
-  has settled.
-- Needs the editor with a level viewport (Black Eye's LookAt reads it). Nothing headless.
+- **Console:** `BlackEyeCustom.FastBake.BakeEdit [handles] [warmup] [keep 0|1] [lock 0|1|2] [selected 0|1|2|3]
+  [mode 0|1|2] [direct 0|1] [setup 0|1]` (selected 2: their whole shots, 3: their shots, every use) and
+  `BlackEyeCustom.FastBake.EditPlan [handles] [selected 0|1|2|3] [mode 0|1|2]`.
 
-## Reproduce Fast Bake
+### Reproduce
 
 1. In any UE 5.8 project with Black Eye and this plugin enabled, run `Tools/fast_bake_repro.py` in the editor
    (`py "<path>/fast_bake_repro.py"`, add `--mesh`/`--anim` if the Third Person mannequin is elsewhere). It builds a
@@ -94,21 +130,72 @@ Three places give the whole picture:
 5. For Bake Edit, `Tools/fast_bake_edit_repro.py` adds an edit and a nested edit over the shot; its docstring gives
    the frames each should key.
 
-## Using Black Eye Setup
+---
 
-Open a shot in Sequencer (a master edit: step into the shot), put the playhead inside it, and click **Black Eye
-Setup** on the Sequencer toolbar. The window works on one Black Eye camera of that shot (picked from the selection,
-the camera cut, or the Camera list):
+## Black Eye Setup
 
-- **Follow / LookAt / Focus**: ON or OFF, each on its own. Each switch also sets the camera's tracks, and the camera
-  stays where it is when you switch. Off, Follow leaves the position and LookAt the aim to the Transform track; Focus
-  off holds the current focus distance.
-- **Use Selected**: the actor selected in the level becomes that switch's subject (a character gives its `Heading`
-  socket or pelvis for Follow, its tracker or head for LookAt and Focus). **Fill all from selected character** does
-  all three.
-- **From the playhead on (keyed)**: switches and subjects change from the playhead on instead of for the whole shot.
-- Every action is one undo step. Python: `unreal.BlackEyeSetupLibrary` (`get_setup_state`, `set_setup_switch`,
-  `set_setup_subject`, `autofill_setup`); console: `BlackEyeCustom.Setup.*`. Details: `docs/blackeye-setup/DESIGN.md`.
+**The problem.** Follow, LookAt and Focus each take over part of a Black Eye camera, but Sequencer doesn't know that.
+The Transform track UE adds to a spawnable camera still applies every channel, keyed or not, and fights whatever
+Black Eye drives. With LookAt off, Black Eye still rotates the camera, and its own focus can lock at 1.5 cm. Subject
+references on a spawnable camera are lost in renders unless keyed. So every Follow / LookAt / Focus combination
+needs its own hand-made track setup, and getting it wrong shows up as jitter, aim drift or locked focus.
+
+**What it does.** Open a shot, put the playhead inside it and click **Black Eye Setup** on the Sequencer toolbar.
+Three switches, each on its own, each with its subject. Every switch sets the camera **and** its tracks, and the
+camera stays exactly where it is when you flip it.
+
+| Switch | ON | OFF |
+|---|---|---|
+| **Follow** | follows its subject; the offset is measured from where the camera is now | the camera stays put; its position is yours (Transform track Location) |
+| **LookAt** | aims at its subject | the aim stays where it is and becomes yours (Transform track Rotation) |
+| **Focus** | the lens focuses on its subject every frame (works with LookAt off) | manual focus, held at the current distance |
+
+### What it does to the tracks
+
+![All three switches on: the Transform track keeps only Scale; subject references are keyed](docs/images/setup-all-on.png)
+
+**All on.** Follow drives the position and LookAt the aim, so the camera's Transform track keeps only **Scale**:
+Location and Rotation are switched off (the section's Active Channels), keys and all, so they can't fight Black Eye.
+Each subject gets an actor-reference track (`ActorToTrack` on the CameraComponent, `Actor` under Follow and LookAt)
+so a spawnable camera still finds its subjects in renders.
+
+![LookAt off: the Transform track's Rotation channel is back](docs/images/setup-lookat-off.webp)
+
+**LookAt off.** The camera's current aim moves onto the camera itself and the **Rotation** channel comes back on the
+Transform track: rotation is now yours to key. Follow is set to move the camera without turning it. Here the shot
+already had rotation keys, so the window notes that those keys drive the camera now.
+
+![Follow off as well: Location is back too](docs/images/setup-follow-off.png)
+
+**Follow off too.** The **Location** channel comes back as well, starting from where the camera is. The camera now
+behaves like a plain CineCamera, while Focus keeps tracking the subject.
+
+### Subjects and the rest
+
+- **Use Selected**: the actor selected in the level becomes that switch's subject. A character gives its `Heading`
+  socket (else its pelvis) for Follow, and its tracker (else its head) for LookAt and Focus.
+- **Fill all from selected character** sets all three at once.
+- **From the playhead on (keyed)**: switches and subjects change from the playhead on instead of for the whole shot
+  (the switch is keyed there and the Transform section is split there). Focus on/off is always the whole shot,
+  because the lens's focus method can't be keyed; changing the focus *subject* from the playhead works.
+- In an edit, step into the shot first: the cameras live in the shots.
+- Every action is one undo step. **Python:** `unreal.BlackEyeSetupLibrary` (`get_setup_state`, `set_setup_switch`,
+  `set_setup_subject`, `autofill_setup`). **Console:** `BlackEyeCustom.Setup.Open | State | Switch | SwitchHere | Fill`.
+
+---
+
+## For the Black Eye team
+
+Three places give the whole picture:
+
+1. **`docs/<module>/DESIGN.md`**: the problem, its root cause cited to Black Eye and engine source by `file:line`
+   (pinned to Black Eye 2.0.7 / UE 5.8), the algorithm, every trap, rejected ideas with reasons, measured numbers,
+   and a section on what becomes trivial inside Black Eye.
+2. **`grep -rn BE-NATIVE Source/`**: every workaround carries a `// BE-NATIVE: <native alternative> (<file:line>)`
+   comment. Together they are the port checklist.
+3. **`Source/BlackEyeCustomEditor/Public/BlackEyeContract.h`**: every Black Eye class, function and property this
+   plugin uses. It reaches Black Eye through reflection rather than linking it, so this one file is the whole
+   dependency surface. The `BlackEyeCustom.SelfTest` console command checks each entry.
 
 ## Requirements
 
