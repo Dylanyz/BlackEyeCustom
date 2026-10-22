@@ -442,8 +442,10 @@ Not built yet: re-sync settings without re-baking (P2); keeping the previous bak
     Always copies the setup.
   - **Lock only the baked frames** (`bLockBakedFramesOnly`, any mode): the shot's camera cuts on the Black Eye camera
     are split at each baked span (`UMovieSceneSection::SplitSection`) and the pieces inside point at the twin; the rest
-    stay live, in every edit using the shot. Pieces locked by earlier bakes stay locked; unlock repoints them all, the
-    split points stay (they change nothing).
+    stay live, in every edit using the shot. Pieces locked by earlier bakes stay locked; unlock repoints them all.
+    After any lock / unlock / rebind, neighbouring cuts left on the same camera (same row, touching, no ease at the
+    seam, same settings) are joined (`MergeTouchingCuts`, 2026-10-22): a same-camera seam changes no editor frame but
+    is still a cut, so a render sends Black Eye a camera-cut snap there. Full unlock or full lock = one cut again.
   - **Shot controls** (*built and measured on the repro 2026-10-07*): when the window is about one shot (a single selected shot
     section, or a shot Sequencer has open with nothing selected), it lists that shot's Black Eye cameras (the one on a
     camera cut first) and each one's bake cameras, plus "Create new +", and has Lock / Unlock buttons that act at once,
