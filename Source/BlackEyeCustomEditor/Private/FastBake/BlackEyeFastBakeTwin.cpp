@@ -595,11 +595,8 @@ namespace BlackEyeFastBake
 				}
 			}
 		}
-		if (Changed > 0)
-		{
-			MergeTouchingCuts(MovieScene);
-		}
-		return Changed;
+		// Always, not only when something moved: cuts already on To keep the seams earlier locks left (2026-10-22).
+		return Changed + MergeTouchingCuts(MovieScene);
 	}
 
 	/** How a twin was baked: date, frames, settings, Black Eye version, the components its setup carries. */
@@ -690,15 +687,13 @@ namespace BlackEyeFastBake
 				++Changed;
 			}
 		}
-		if (Changed > 0)
-		{
-			MergeTouchingCuts(MovieScene); // a span joining a neighbour on the same camera leaves one cut, not a seam
-		}
-		if (bSplit || Changed > 0)
+		// A span joining a neighbour on the same camera leaves one cut, not a seam; old seams are joined too.
+		const int32 Merged = MergeTouchingCuts(MovieScene);
+		if (bSplit || Changed > 0 || Merged > 0)
 		{
 			Cuts->RearrangeAllSections(); // sorted by time, as Sequencer keeps them
 		}
-		return Changed;
+		return Changed + Merged;
 	}
 
 	bool IsLocked(const UMovieScene& MovieScene, const FGuid& Twin)
