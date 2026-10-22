@@ -526,6 +526,58 @@ namespace BlackEyeFastBake
 		return Twin;
 	}
 
+	/**
+	 * Joins camera cuts that lock / unlock left side by side on the same camera: same row, the first ending where the
+	 * second starts, no ease at the seam, same settings. A seam there changes no frame in the editor but is still a cut,
+	 * so a render sends Black Eye a camera-cut snap at it. Returns how many cuts were removed.
+	 */
+	int32 MergeTouchingCuts(UMovieScene& MovieScene)
+	{
+		UMovieSceneCameraCutTrack* Cuts = Cast<UMovieSceneCameraCutTrack>(MovieScene.GetCameraCutTrack());
+		if (!Cuts)
+		{
+			return 0;
+		}
+		TArray<UMovieSceneCameraCutSection*> Sorted;
+		for (UMovieSceneSection* Section : Cuts->GetAllSections())
+		{
+			if (UMovieSceneCameraCutSection* Cut = Cast<UMovieSceneCameraCutSection>(Section))
+			{
+				Sorted.Add(Cut);
+			}
+		}
+		Sorted.Sort([](const UMovieSceneCameraCutSection& A, const UMovieSceneCameraCutSection& B)
+		{
+			return A.GetRowIndex() != B.GetRowIndex() ? A.GetRowIndex() < B.GetRowIndex()
+				: (!A.HasStartFrame() || (B.HasStartFrame() && A.GetInclusiveStartFrame() < B.GetInclusiveStartFrame()));
+		});
+		int32 Removed = 0;
+		for (int32 i = Sorted.Num() - 1; i > 0; --i)
+		{
+			UMovieSceneCameraCutSection* Left = Sorted[i - 1];
+			UMovieSceneCameraCutSection* Right = Sorted[i];
+			const bool bJoin = Left->GetRowIndex() == Right->GetRowIndex()
+				&& Left->HasEndFrame() && Right->HasStartFrame() && Left->GetExclusiveEndFrame() == Right->GetInclusiveStartFrame()
+				&& Left->GetCameraBindingID() == Right->GetCameraBindingID()
+				&& Left->Easing.GetEaseOutDuration() == 0 && Right->Easing.GetEaseInDuration() == 0
+				&& Left->bLockPreviousCamera == Right->bLockPreviousCamera
+				&& Left->IsActive() == Right->IsActive() && Left->IsLocked() == Right->IsLocked();
+			if (!bJoin)
+			{
+				continue;
+			}
+			Left->Modify();
+			Left->Easing.bManualEaseOut = Right->Easing.bManualEaseOut;
+			Left->Easing.ManualEaseOutDuration = Right->Easing.ManualEaseOutDuration;
+			Left->Easing.AutoEaseOutDuration = Right->Easing.AutoEaseOutDuration;
+			Left->SetRange(TRange<FFrameNumber>(Left->GetRange().GetLowerBound(), Right->GetRange().GetUpperBound()));
+			Cuts->Modify();
+			Cuts->RemoveSection(*Right);
+			++Removed;
+		}
+		return Removed;
+	}
+
 	/** Points every camera cut on any of From at To. */
 	int32 RebindCuts(UMovieScene& MovieScene, TConstArrayView<FGuid> From, const FGuid& To)
 	{
@@ -542,6 +594,10 @@ namespace BlackEyeFastBake
 					++Changed;
 				}
 			}
+		}
+		if (Changed > 0)
+		{
+			MergeTouchingCuts(MovieScene);
 		}
 		return Changed;
 	}
@@ -594,7 +650,7 @@ namespace BlackEyeFastBake
 	/**
 	 * Splits the camera cuts playing any of From at Span's edges and points the pieces inside at To: only the frames
 	 * baked play the bake, the rest keep what they played. Cuts already on To are left alone, so spans locked by earlier
-	 * bakes stay locked. Also unlocks a span (From the twins, To the camera).
+	 * bakes stay locked. Also unlocks a span (From the twins, To the camera). Neighbours left on the same camera are joined.
 	 */
 	int32 LockSpan(UMovieScene& MovieScene, TConstArrayView<FGuid> From, const FGuid& To, const TRange<FFrameNumber>& Span)
 	{
@@ -634,7 +690,11 @@ namespace BlackEyeFastBake
 				++Changed;
 			}
 		}
-		if (bSplit)
+		if (Changed > 0)
+		{
+			MergeTouchingCuts(MovieScene); // a span joining a neighbour on the same camera leaves one cut, not a seam
+		}
+		if (bSplit || Changed > 0)
 		{
 			Cuts->RearrangeAllSections(); // sorted by time, as Sequencer keeps them
 		}
