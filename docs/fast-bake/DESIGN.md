@@ -365,6 +365,13 @@ Not built yet: re-sync settings without re-baking (P2); keeping the previous bak
     hold its scene, whose assembly may itself be a Cinematic Shot track into takes.
   - **Handles** widen each used span on both sides, clamped to the camera cut (outside it that camera isn't shown),
     then spans per shot camera are merged.
+  - **Fractional ends** (measured and fixed 2026-10-22, `ToDisplayFrame`). A section with a play rate or a sub-frame
+    offset shows the shot between frames, so its last sample blends toward the key of the frame after it. Spans ended
+    at the ceiling of the section's inner end, which left that key out: a section at play rate 0.33 ended at inner
+    frame 36921.94, so frame 36922 wasn't baked and kept a key from an older bake 10 cm and 6° away. The section's
+    last frame showed part of that jump, and Sequencer's loop wrap, which lands one tick before the range end
+    (`FSequencer::SetLocalTimeLooped`, `Sequencer.cpp`), showed nearly all of it. A span end between frames now takes
+    the frame after it too; ends on whole frames are unchanged.
   - **Stepping** (`RunBake` with `Ranges`): runs of keyed spans, each opening with the snap, the settle (trap 4.15)
     and `WarmUpFrames` unkeyed frames. Spans closer than the warm-up share one run: stepping the gap costs no more
     than a new warm-up and keeps the damping continuous, as playback would. Only frames inside a span are sampled.

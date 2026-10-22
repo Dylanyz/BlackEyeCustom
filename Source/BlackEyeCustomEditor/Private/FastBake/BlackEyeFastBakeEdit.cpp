@@ -108,6 +108,21 @@ namespace BlackEyeFastBake
 
 	namespace Edit
 	{
+		/**
+		 * Shot ticks to a display frame of a bake span. A start floors. An end (exclusive) on a whole frame stays; one
+		 * between frames also takes the frame after it: a slowed or offset section samples between frames, and its last
+		 * sample blends toward that frame's key (DESIGN section 6, "Fractional ends").
+		 */
+		int32 ToDisplayFrame(const UMovieScene& MovieScene, FFrameNumber Tick, bool bEnd)
+		{
+			const FFrameTime T = FFrameRate::TransformTime(FFrameTime(Tick), MovieScene.GetTickResolution(), MovieScene.GetDisplayRate());
+			if (!bEnd || T.GetSubFrame() == 0.f)
+			{
+				return T.FloorToFrame().Value;
+			}
+			return T.FloorToFrame().Value + 2;
+		}
+
 		/** A binding's class without spawning it: a spawnable's template, else a possessable's class. */
 		const UClass* BindingClass(ULevelSequence* Sequence, const FGuid& Guid, const TSharedRef<UE::MovieScene::FSharedPlaybackState>& State)
 		{
@@ -329,11 +344,7 @@ namespace BlackEyeFastBake
 			}
 			++Plans[Index].NumUses;
 
-			auto ToDisplay = [MovieScene](FFrameNumber Tick, bool bCeil)
-			{
-				const FFrameTime T = FFrameRate::TransformTime(FFrameTime(Tick), MovieScene->GetTickResolution(), MovieScene->GetDisplayRate());
-				return bCeil ? T.CeilToFrame().Value : T.FloorToFrame().Value;
-			};
+			auto ToDisplay = [MovieScene](FFrameNumber Tick, bool bEnd) { return ToDisplayFrame(*MovieScene, Tick, bEnd); };
 			Spans[Index].Add({ ToDisplay(Use.Ticks.GetLowerBoundValue(), false), ToDisplay(Use.Ticks.GetUpperBoundValue(), true),
 				Use.CutTicks.HasLowerBound() ? ToDisplay(Use.CutTicks.GetLowerBoundValue(), false) : TNumericLimits<int32>::Lowest(),
 				Use.CutTicks.HasUpperBound() ? ToDisplay(Use.CutTicks.GetUpperBoundValue(), true) : TNumericLimits<int32>::Max() });
@@ -472,11 +483,7 @@ namespace BlackEyeFastBake
 					const UMovieScene* MovieScene = ShotSequence->GetMovieScene();
 					const TRange<FFrameNumber> Window = TRange<FFrameNumber>::Intersection(MovieScene->GetPlaybackRange(),
 						bWholeShot ? TRange<FFrameNumber>::All() : SectionTicks);
-					auto ToDisplay = [MovieScene](FFrameNumber Tick, bool bCeil)
-					{
-						const FFrameTime T = FFrameRate::TransformTime(FFrameTime(Tick), MovieScene->GetTickResolution(), MovieScene->GetDisplayRate());
-						return bCeil ? T.CeilToFrame().Value : T.FloorToFrame().Value;
-					};
+					auto ToDisplay = [MovieScene](FFrameNumber Tick, bool bEnd) { return ToDisplayFrame(*MovieScene, Tick, bEnd); };
 					auto Add = [&](const TRange<FFrameNumber>& Ticks)
 					{
 						if (!Ticks.IsEmpty() && Ticks.HasLowerBound() && Ticks.HasUpperBound())
