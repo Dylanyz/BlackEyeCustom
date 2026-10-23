@@ -979,13 +979,11 @@ namespace BlackEyeSetup
 		{
 			State.FollowSubject = ToSubject(Value);
 		}
+		bool bLookAtWeightZero = false; // intended while LookAt is off (SetSwitch, LookAt off)
 		if (ReadSubject(GetLookAtComponent(Setup), Names::Target0, Value))
 		{
 			State.LookAtSubject = ToSubject(Value);
-			if (Value.Actor && Value.bHasWeight && Value.Weight <= 0.f)
-			{
-				State.Warnings.Add(TEXT("LookAt subject weight is 0, so Black Eye ignores it (turning LookAt on sets it to 1)"));
-			}
+			bLookAtWeightZero = Value.Actor && Value.bHasWeight && Value.Weight <= 0.f;
 		}
 		const UCineCameraComponent* Cine = Lens(const_cast<AActor*>(Setup));
 		bool bBlackEyeFocus = false;
@@ -1024,6 +1022,10 @@ namespace BlackEyeSetup
 		{
 			State.bLookAt = *Keyed;
 			State.Warnings.Add(TEXT("LookAt is keyed: it shows the value at the playhead, and switching it keys it there"));
+		}
+		if (State.bLookAt && bLookAtWeightZero)
+		{
+			State.Warnings.Add(TEXT("LookAt subject weight is 0, so Black Eye ignores it (turning LookAt on sets it to 1)"));
 		}
 		return State;
 	}
@@ -1075,7 +1077,7 @@ namespace BlackEyeSetup
 		{
 			if (bOn && !Before.FollowSubject.Actor)
 			{
-				return TEXT("error: Follow has no subject; pick one first (Use Selected, or Fill from Character)");
+				return TEXT("error: Follow has no subject; pick one first (Use Selected, or Fill from Character). For a plain camera, use All off");
 			}
 			// Keep the camera where it is: measure the offset from here, in the frame Follow will use. Black Eye's own
 			// Details toggle does the same (BlackEyeFollowComponent.cpp:308-321), but only on a Details edit.
@@ -1166,7 +1168,7 @@ namespace BlackEyeSetup
 		{
 			if (bOn && !Before.LookAtSubject.Actor)
 			{
-				return TEXT("error: LookAt has no subject; pick one first (Use Selected, or Fill from Character)");
+				return TEXT("error: LookAt has no subject; pick one first (Use Selected, or Fill from Character). For a plain camera, use All off");
 			}
 			// Off: hand the aim to the actor. The root takes the lens's current world rotation and the lens's own relative
 			// rotation goes to zero, so the view doesn't move and the Transform track's Rotation now aims the camera.
@@ -1184,16 +1186,18 @@ namespace BlackEyeSetup
 				// Black Eye's own focus locks for good with LookAt off (skill ref lookat-off-focus.md); the Focus switch
 				// uses the lens's Tracking focus instead, so Black Eye never writes focus.
 				SetBool(LookAt, Names::SetFocusDistance, false);
-				if (bOn)
+				// Weight 1 while on, 0 while off. Off still snaps: every snap request (piloting release, camera cut, spawn)
+				// holds composition, and a held LookAt aims at its real subjects whatever bEnableLookAt says
+				// (BlackEyeLookUtils.cpp:295, via BlackEyeCameraSubsystem.cpp:1163 on a pilot release). Weight 0 makes the
+				// subject invalid (BlackEyeWeightedTarget.h:33-35), so a held LookAt has nothing to aim at; the subject stays.
+				// BE-NATIVE: don't use the subjects while LookAt is off, held or not (BlackEyeLookUtils.cpp:295).
+				FSubjectValue Subject;
+				if (!(When.bKeyed && bSetup) && ReadSubject(LookAt, Names::Target0, Subject) && Subject.Actor && Subject.bHasWeight)
 				{
-					FSubjectValue Subject;
-					if (ReadSubject(LookAt, Names::Target0, Subject) && Subject.bHasWeight && Subject.Weight <= 0.f)
-					{
-						Subject.Weight = 1.f;
-						WriteSubject(LookAt, Names::Target0, Subject);
-					}
+					Subject.Weight = bOn ? 1.f : 0.f;
+					WriteSubject(LookAt, Names::Target0, Subject);
 				}
-				else
+				if (!bOn)
 				{
 					USceneComponent* Root = Actor.GetRootComponent();
 					UCineCameraComponent* Cine = Lens(&Actor);
@@ -1219,7 +1223,8 @@ namespace BlackEyeSetup
 			if (When.bKeyed)
 			{
 				KeyBool(Camera, LiveLookAt, Names::EnableLookAt, bTemplateLookAt, bOn, When);
-				Log.Add(FString::Printf(TEXT("LookAt keyed %s from the playhead"), bOn ? TEXT("on") : TEXT("off")));
+				KeyFloat(Camera, LiveLookAt, TEXT("Weight"), TEXT("Target_0.Weight"), bTemplateLookAt ? 1.0 : 0.0, bOn ? 1.0 : 0.0, When);
+				Log.Add(FString::Printf(TEXT("LookAt keyed %s from the playhead (with its subject weight)"), bOn ? TEXT("on") : TEXT("off")));
 			}
 			else
 			{
@@ -1301,6 +1306,21 @@ namespace BlackEyeSetup
 		return Log.Join();
 	}
 
+	FString AllOff(const FCamera& Camera)
+	{
+		// Every switch's off path, whatever the switches read: a camera that never had a subject reads off already, but
+		// Black Eye still aims its lens (LookAt off runs, BlackEyeLookAtComponent.cpp:522) and the Transform track's
+		// channels may still be masked. Off needs no subject. The steps nest into this one transaction.
+		const FScopedTransaction Transaction(LOCTEXT("AllOff", "Black Eye Setup: all off"));
+		TArray<FString> Lines;
+		for (const EBlackEyeSetupSwitch Switch : { EBlackEyeSetupSwitch::Follow, EBlackEyeSetupSwitch::LookAt, EBlackEyeSetupSwitch::Focus })
+		{
+			Lines.Add(SetSwitch(Camera, Switch, false));
+		}
+		return FString::Printf(TEXT("all off on %s: the camera is yours (Transform track Location and Rotation, manual focus)\n"), *Camera.Name)
+			+ FString::Join(Lines, TEXT("\n"));
+	}
+
 	FString SetSubject(const FCamera& Camera, EBlackEyeSetupSwitch Switch, const FBlackEyeSetupSubject& Subject)
 	{
 		FLog Log;
@@ -1351,9 +1371,10 @@ namespace BlackEyeSetup
 		else
 		{
 			const bool bFollow = Switch == EBlackEyeSetupSwitch::Follow;
-			if (bFollow && !ReadState(Camera).bFollow)
+			const FBlackEyeSetupState Now = ReadState(Camera);
+			if (bFollow ? !Now.bFollow : !Now.bLookAt)
 			{
-				Value.Weight = 0.f; // Follow is off: keep the spawn snap away (see SetSwitch, Follow)
+				Value.Weight = 0.f; // the switch is off: keep the snaps away (see SetSwitch, Follow and LookAt)
 			}
 			EditBoth(Camera, [&](AActor& Actor, bool bSetup)
 			{
@@ -1531,6 +1552,13 @@ FString UBlackEyeSetupLibrary::SetSetupSwitch(ULevelSequence* Sequence, const FS
 	BlackEyeSetup::FCamera Camera;
 	FString Error;
 	return CameraFor(Sequence, CameraBindingName, Camera, Error) ? BlackEyeSetup::SetSwitch(Camera, Switch, bOn, bFromPlayhead) : TEXT("error: ") + Error;
+}
+
+FString UBlackEyeSetupLibrary::SetSetupAllOff(ULevelSequence* Sequence, const FString& CameraBindingName)
+{
+	BlackEyeSetup::FCamera Camera;
+	FString Error;
+	return CameraFor(Sequence, CameraBindingName, Camera, Error) ? BlackEyeSetup::AllOff(Camera) : TEXT("error: ") + Error;
 }
 
 FString UBlackEyeSetupLibrary::SetSetupSubject(ULevelSequence* Sequence, const FString& CameraBindingName, EBlackEyeSetupSwitch Switch,

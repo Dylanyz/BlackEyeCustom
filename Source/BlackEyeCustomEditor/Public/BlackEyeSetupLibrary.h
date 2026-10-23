@@ -79,6 +79,10 @@ public:
 	static FString SetSetupSwitch(ULevelSequence* Sequence, const FString& CameraBindingName, EBlackEyeSetupSwitch Switch, bool bOn,
 	                              bool bFromPlayhead = false);
 
+	/** Follow, LookAt and Focus off, with or without subjects: the camera as a plain CineCamera, the Transform track's. */
+	UFUNCTION(BlueprintCallable, Category = "Black Eye|Setup")
+	static FString SetSetupAllOff(ULevelSequence* Sequence, const FString& CameraBindingName);
+
 	/**
 	 * Sets one switch's subject (and the reference tracks a spawnable camera needs for it). bFromPlayhead: the subject
 	 * reference is keyed at the playhead and the old subject stays before it (same component and bone only).

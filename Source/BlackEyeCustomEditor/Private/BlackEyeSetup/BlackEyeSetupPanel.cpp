@@ -176,6 +176,20 @@ namespace BlackEyeSetup
 							return FReply::Handled();
 						})
 					]
+					+ SVerticalBox::Slot().AutoHeight().Padding(0, 4, 0, 0)
+					[
+						SNew(SButton)
+						.Text(LOCTEXT("AllOff", "All off (plain CineCamera)"))
+						.ToolTipText(LOCTEXT("AllOffTip", "Follow, LookAt and Focus off, even when they already read off or have no subject. "
+						                                  "The camera stays where it is; the Transform track moves and aims it, focus is manual. "
+						                                  "Subjects are kept (weight 0), so a switch can come back on later."))
+						.IsEnabled_Lambda([this]() { return State.bValid; })
+						.OnClicked_Lambda([this]()
+						{
+							Run([](const FCamera& Camera) { return AllOff(Camera); });
+							return FReply::Handled();
+						})
+					]
 					+ SVerticalBox::Slot().AutoHeight().Padding(0, 8, 0, 0)
 					[
 						SNew(STextBlock).AutoWrapText(true)
@@ -467,6 +481,12 @@ namespace BlackEyeSetup
 				}
 				const bool bOn = FCString::Atoi(*Args[1]) != 0;
 				WithCamera(Args.IsValidIndex(2) ? Args[2] : FString(), [Switch, bOn](const FCamera& Camera) { return SetSwitch(Camera, Switch, bOn, true); });
+			}));
+
+		FAutoConsoleCommand GAllOff(TEXT("BlackEyeCustom.Setup.AllOff"), TEXT("[Camera]: Follow, LookAt and Focus off (no subjects needed): a plain CineCamera."),
+			FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString>& Args)
+			{
+				WithCamera(Args.IsValidIndex(0) ? Args[0] : FString(), [](const FCamera& Camera) { return AllOff(Camera); });
 			}));
 
 		FAutoConsoleCommand GFill(TEXT("BlackEyeCustom.Setup.Fill"), TEXT("[Camera]: fill the subjects from the character selected in the level."),

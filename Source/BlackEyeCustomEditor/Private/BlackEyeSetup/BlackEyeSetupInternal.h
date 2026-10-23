@@ -42,6 +42,8 @@ namespace BlackEyeSetup
 	/** Each one undo step; the returned text says what changed, one line each. */
 	/** bFromPlayhead: keyed from the playhead on, the Transform section split there (DESIGN §5); else the whole shot. */
 	FString SetSwitch(const FCamera& Camera, EBlackEyeSetupSwitch Switch, bool bOn, bool bFromPlayhead = false);
+	/** Follow, LookAt and Focus off, whatever they read and with or without subjects: the camera as a plain CineCamera. */
+	FString AllOff(const FCamera& Camera);
 	FString SetSubject(const FCamera& Camera, EBlackEyeSetupSwitch Switch, const FBlackEyeSetupSubject& Subject);
 	/** The subject reference keyed at the playhead; the subject before it stays. Same component and bone only. */
 	FString SetSubjectFromPlayhead(const FCamera& Camera, EBlackEyeSetupSwitch Switch, const FBlackEyeSetupSubject& Subject);

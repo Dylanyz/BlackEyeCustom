@@ -56,6 +56,7 @@ Sequencer toolbar → **Black Eye Setup** (beside Bake Edit) opens a small windo
   so the camera keeps its place when switched and nothing fights it.
 - **A subject per switch**, with **Use Selected** (the actor selected in the level).
 - **Fill all from selected character**: Follow its `Heading` socket (else pelvis), LookAt and Focus its tracker.
+- **All off (plain CineCamera)**: every switch's off path, with or without subjects (§4, All off).
 - **From the playhead on (keyed)**: switches and subjects change from the playhead on only (§4a); off, the whole shot.
 - A status line saying what each action changed, and warnings (keyed switches, weight 0).
 
@@ -67,7 +68,7 @@ Sequencer toolbar → **Black Eye Setup** (beside Bake Edit) opens a small windo
 
 Also: `UBlackEyeSetupLibrary` (`GetSetupState`, `SetSetupSwitch`, `SetSetupSubject`, `AutofillSetup`) and console
 commands `BlackEyeCustom.Setup.Open | State | Switch <Follow|LookAt|Focus> <0|1> [Camera] | SwitchHere <Follow|LookAt> <0|1>
-[Camera] | Fill [Camera]`. Every action
+[Camera] | AllOff [Camera] | Fill [Camera]`, library `SetSetupAllOff`. Every action
 is one undo step.
 
 ## 3. Which camera
@@ -105,15 +106,25 @@ back on its track (-400, -400); with weight 0 the subject is invalid (`BlackEyeW
 nothing to move to, and the respawned camera stayed on its track. The subject itself is kept.
 BE-NATIVE: skip the spawn snap while Follow is off.
 
-**LookAt on.** Needs a subject; a subject weight of 0 is set to 1 (weight 0 makes Black Eye ignore the subject,
+**LookAt on.** Needs a subject; its weight is set to 1 (weight 0 makes Black Eye ignore the subject,
 `BlackEyeWeightedTarget.h:33-35`, which silently froze aim and focus in production).
 
 **LookAt off.** The lens's current world rotation goes onto the root, and the lens's own relative rotation to zero,
 so the view doesn't move and the root (Transform track Rotation) aims the camera from now on. Black Eye still
 rebuilds the lens from the root every tick (`BlackEyeLookAtComponent.cpp:522`, `BlackEyeLookUtils.cpp:635-657`): with
 LookAt off it aims along the lens's own forward, which now rides with the root. If Follow is on, Final Orientation
-Mode becomes Manual. `bSetFocusDistance` is turned off (see Focus).
-BE-NATIVE: with LookAt off, leave the lens to the actor (`BlackEyeLookAtComponent.cpp:522`).
+Mode becomes Manual. `bSetFocusDistance` is turned off (see Focus). The LookAt subject's weight goes to 0 (back to 1
+when LookAt comes on; keyed with the switch from the playhead): every snap request holds composition, and a held LookAt
+aims at its real subjects whatever `bEnableLookAt` says (`BlackEyeLookUtils.cpp:295`). Releasing a pilot (right-drag in
+a viewport piloting the camera) snaps both components (`BlackEyeCameraSubsystem.cpp:1163`), so with LookAt off and a
+live subject the camera turned to face the subject on release, and LookAt-off then held that aim (Dylan, 2026-10-23).
+Weight 0 leaves the held LookAt no target, so it keeps the aim. A subject set while LookAt is off gets weight 0 too.
+BE-NATIVE: with LookAt off, leave the lens to the actor (`BlackEyeLookAtComponent.cpp:522`) and ignore the subjects even
+while holding composition (`BlackEyeLookUtils.cpp:295`).
+
+**All off.** Follow off, LookAt off, Focus off in one transaction, whatever the switches read. A camera that never had a
+subject reads off already (the switches couldn't run their off path: switching on needs a subject), yet Black Eye
+still aims its lens and the Transform channels may be masked. Off needs no subject. Built 2026-10-23.
 
 **Focus on.** The lens's own Tracking focus (`FocusSettings.FocusMethod = Tracking`, `ActorToTrack` = subject),
 worked out by the engine every frame with no state (`CineCameraComponent.cpp:556-582`), never Black Eye's. Black
@@ -257,6 +268,8 @@ Manny's head; MDR_58_tester, UE 5.8.3, Black Eye 2.0.7, 2026-10-21. Camera lens 
 | Self-test | 20 checks ok (7 new) |
 
 ## 12. Open
+
+- All off and LookAt-off weight 0 (2026-10-23): built, not yet measured in the editor (installs on the next editor close).
 
 - Click test of the window by hand (synthetic clicks didn't reach it, §8.4).
 - Movie render of a shot with keyed switches (measured in the editor only).
