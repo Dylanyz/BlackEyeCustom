@@ -218,6 +218,38 @@ namespace BlackEyeSetup
 			}
 		}
 
+		/** A float property track's unkeyed sections take the value; keyed ones are left and reported. */
+		void SetFloatTrackDefault(const FCamera& Camera, UObject* LiveComponent, const FString& Path, float Value, FLog& Log)
+		{
+			UMovieSceneFloatTrack* Track = FindPropertyTrack<UMovieSceneFloatTrack>(*Camera.MovieScene, ComponentBinding(Camera, LiveComponent, false), Path);
+			for (UMovieSceneSection* Section : Track ? Track->GetAllSections() : TArray<UMovieSceneSection*>())
+			{
+				FMovieSceneFloatChannel* Channel = Section->GetChannelProxy().GetChannel<FMovieSceneFloatChannel>(0);
+				if (!Channel)
+				{
+					continue;
+				}
+				if (Channel->GetNumKeys() > 0)
+				{
+					Log.Add(FString::Printf(TEXT("warning: %s is keyed in the sequence; its keys still decide it"), *Path));
+					continue;
+				}
+				Section->Modify();
+				Channel->SetDefault(Value);
+			}
+		}
+
+		/**
+		 * Black Eye's own focus off, in the sequence too. A Set Focus Distance track (Black Eye's panel or a Details key adds
+		 * one) applies its default every frame, so writing the property alone didn't stick: measured 2026-10-23, Focus off
+		 * left Black Eye's focus running, the window still read Focus on, focus locked at 1.5 cm, and with LookAt off the
+		 * aim drifted toward that 1.5 cm virtual target (BlackEyeLookUtils.cpp:313-335).
+		 */
+		void BlackEyeFocusOffInTracks(const FCamera& Camera, FLog& Log)
+		{
+			SetBoolTrackDefault(Camera, GetLookAtComponent(Camera.Live), Names::SetFocusDistance, false, Log);
+		}
+
 		/** Where a switch takes effect: the whole shot (defaults), or from a frame on (keys). Tick times of the focused sequence. */
 		struct FWhen
 		{
@@ -1220,6 +1252,7 @@ namespace BlackEyeSetup
 				}
 			});
 			UObject* LiveLookAt = GetLookAtComponent(Camera.Live);
+			BlackEyeFocusOffInTracks(Camera, Log);
 			if (When.bKeyed)
 			{
 				KeyBool(Camera, LiveLookAt, Names::EnableLookAt, bTemplateLookAt, bOn, When);
@@ -1255,9 +1288,22 @@ namespace BlackEyeSetup
 			// CineCameraComponent.cpp:595, UE 5.8.3); resolve it now so Off holds the focus the camera has (Fast Bake trap 4.19).
 			FMinimalViewInfo View;
 			LiveLens->GetCameraView(0.f, View);
-			const float Resolved = LiveLens->CurrentFocusDistance;
-			const float Distance = Resolved > LiveLens->LensSettings.MinimumFocusDistance * 0.1f + 0.01f
-				? Resolved : LiveLens->FocusSettings.ManualFocusDistance;
+			// The first sane distance: what the lens resolves, the focus subject's depth along the lens axis, the manual
+			// distance, else 10 m. Black Eye's lock leaves the lens at the 1.5 cm floor (skill ref lookat-off-focus.md), and
+			// holding that kept the lock and, with LookAt off, an aim point 1.5 cm ahead (measured 2026-10-23).
+			constexpr float SaneFocus = 20.f; // cm: clear of the Plate/Pedestal guard (lens offset + 10 cm)
+			const float SubjectDepth = Subject
+				? FVector::DotProduct(Subject->GetActorLocation() - LensWorld.GetLocation(), LensWorld.GetUnitAxis(EAxis::X)) : 0.f;
+			const float Candidates[] = { LiveLens->CurrentFocusDistance, SubjectDepth, LiveLens->FocusSettings.ManualFocusDistance };
+			float Distance = 1000.f;
+			for (const float Candidate : Candidates)
+			{
+				if (Candidate > SaneFocus)
+				{
+					Distance = Candidate;
+					break;
+				}
+			}
 			EditBoth(Camera, [&](AActor& Actor, bool bSetup)
 			{
 				UCineCameraComponent* Cine = Lens(&Actor);
@@ -1285,6 +1331,9 @@ namespace BlackEyeSetup
 					Cine->FocusSettings.ManualFocusDistance = Distance;
 				}
 			});
+			// The sequence's own focus tracks would otherwise put Black Eye's focus and the old distance back every frame.
+			BlackEyeFocusOffInTracks(Camera, Log);
+			SetFloatTrackDefault(Camera, LiveLens, TEXT("FocusSettings.ManualFocusDistance"), bOn ? 100000.f : Distance, Log);
 			if (bOn)
 			{
 				SetReferenceTrack(Camera, LiveLens, FocusActorPropertyName, FocusActorPropertyPath, Subject, Log);
@@ -1366,6 +1415,7 @@ namespace BlackEyeSetup
 					}
 				}
 			});
+			BlackEyeFocusOffInTracks(Camera, Log);
 			SetReferenceTrack(Camera, Lens(Camera.Live), FocusActorPropertyName, FocusActorPropertyPath, Subject.Actor, Log);
 		}
 		else

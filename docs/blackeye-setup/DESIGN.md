@@ -138,6 +138,14 @@ BE-NATIVE: run the focus block whether or not pointing runs (`BlackEyeLookUtils.
 something views it (`CineCameraComponent.cpp:595`), so the setup resolves it first (`GetCameraView`, as Fast Bake does,
 trap 4.19 there); without that it read 0 and held 0 (measured 2026-10-21).
 
+**Focus tracks in the sequence (2026-10-23).** A Set Focus Distance track on the LookAt binding (Black Eye's panel or a
+Details key adds one) applies its default every frame, so writing `bSetFocusDistance` false didn't stick: Focus off left
+Black Eye's focus running, the window kept reading Focus on, focus locked at 1.5 cm, and with LookAt off the aim drifted
+toward a virtual target 1.5 cm ahead (seen in production). LookAt and Focus switches and the Focus subject now set that
+track's default to false, and Focus on/off sets an unkeyed Manual Focus Distance track's default to the value it writes
+(keyed tracks are reported). Focus off holds the first distance above 20 cm of: the lens's resolved distance, the
+subject's depth along the lens axis, the manual distance; else 10 m (holding 1.5 cm kept the lock).
+
 ## 4a. From the playhead
 
 *Status: built, measured on the repro 2026-10-21 (§11).*
@@ -269,7 +277,8 @@ Manny's head; MDR_58_tester, UE 5.8.3, Black Eye 2.0.7, 2026-10-21. Camera lens 
 
 ## 12. Open
 
-- All off and LookAt-off weight 0 (2026-10-23): built, not yet measured in the editor (installs on the next editor close).
+- LookAt-off weight 0 (2026-10-23): built, not yet measured. All off: used in production 2026-10-23.
+- Focus tracks and the sane focus distance (2026-10-23): built, not yet measured (installs on the next editor close).
 
 - Click test of the window by hand (synthetic clicks didn't reach it, §8.4).
 - Movie render of a shot with keyed switches (measured in the editor only).
