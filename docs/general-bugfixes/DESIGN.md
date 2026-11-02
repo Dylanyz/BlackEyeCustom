@@ -8,7 +8,7 @@ the bug, why it happens, the guard, the native fix, how to verify. Citations are
 
 | Fix | Status | Off switch |
 |---|---|---|
-| [Slider undo guard](#slider-undo-guard) | built 2026-11-02, not yet run | `BlackEyeCustom.SliderUndoGuard 0` |
+| [Slider undo guard](#slider-undo-guard) | v2 built 2026-11-02, not yet run (v1 missed the leak) | `BlackEyeCustom.SliderUndoGuard 0` |
 
 ## Slider undo guard
 
@@ -39,16 +39,28 @@ Epic's own numeric editor avoids both: it opens the transaction itself in `OnBeg
 `InteractiveChange | NotTransactable` while dragging, and closes it in `OnEndSliderMovement`
 (`SPropertyEditorNumeric.h:569-598`).
 
-### 3. The guard (status: built 2026-11-02, not yet run)
+### 3. The guard (status: v1 built and installed 2026-11-02, missed the leak; v2 built 2026-11-02, not yet run)
 
 `Private/GeneralBugfixes/BlackEyeSliderUndoGuard.cpp`:
 
-- On `TransactionStarted` (top-level only, `TransBuffer.h:76`, `:134`), if the cursor captor is a widget inside the Black Eye
-  panel (`BlackEyeContract::PanelWidgetType`, an ancestor walk), remember the transaction id and the captor.
+- On `TransactionStarted` (top-level only, `TransBuffer.h:76`, `:134`), when the session context is `"PropertyEditor"`
+  and a widget holds the cursor (a drag), remember the transaction id and that widget.
 - On each Slate post-tick, once that widget no longer holds the cursor: if the same transaction is still `GUndo` and
   open, call `GEditor->EndTransaction()` until it closes (at most 256 calls), then log it to `LogBlackEyeCustom`.
 - A drag that closed its own transaction is never touched (`TransactionFinalized` clears the watch first).
-- Off switch: `BlackEyeCustom.SliderUndoGuard 0`.
+- Off switch: `BlackEyeCustom.SliderUndoGuard 0`. `log LogBlackEyeCustom Verbose` logs every drag it watches.
+
+Why the `"PropertyEditor"` context is the signature: only the property system's own value sets open transactions with
+it (`PropertyHandleImpl.cpp:557`, `SPropertyEditorNumeric.h:576`), and on a working drag they close before the
+mouse-up returns. Transactions that are meant to stay open past a click, such as the colour picker's
+(`ColorStructCustomization.cpp:286`) or the vector sliders' (`MathStructCustomizations.cpp:747`), use the empty
+context, so they are never watched. The same leak from any other property drag is closed too.
+
+**v1 missed the leak (measured 2026-11-02).** It only watched drags inside the Black Eye panel and found the panel by
+walking up from the slider to `SBlackEyeTab`. A docked tab's widgets are not children of its `SDockTab`, though: the
+stack holds them (`SDockingTabStack.cpp:181`, `:451`). The walk never matched, and the guard logged nothing during a
+drag that locked Undo. Black Eye's tab ids also differ by code path (`Black_Eye_Editor.cpp:92` vs `:585`), so a tab
+lookup would be fragile as well.
 
 Rejected: a hotkey or console command that ends every open transaction. It would also close legitimate ones, and you
 would still lose undo until you noticed.
@@ -62,7 +74,7 @@ handle swaps no longer matter, and this guard goes quiet.
 
 ### 5. To verify
 
-1. Install, then run `BlackEyeCustom.SelfTest`; check 8 must be `ok`.
+1. Install, then run `BlackEyeCustom.SelfTest`, and `log LogBlackEyeCustom Verbose`.
 2. Drag Subject Screen Position X in the panel repeatedly, including while selecting another camera. Edit ▸ Undo must
-   stay available. Every intervention is logged as `slider undo guard: closed`.
+   stay available. Each drag logs `watching`, and each fix logs `slider undo guard: closed`.
 3. Control: `BlackEyeCustom.SliderUndoGuard 0` should bring the lock back.

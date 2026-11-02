@@ -24,9 +24,15 @@
  *  - A spin box that loses mouse capture mid-drag skips both its commit and OnEndSliderMovement (SSpinBox.cpp:349).
  * Each leak nests the next edit inside it, so the lock grows by one per bad drag (107 were stacked in one session).
  *
- * The guard: when a top-level transaction starts while the cursor is captured by a widget inside the Black Eye panel,
- * remember it. Once that capture is gone (the drag is over, whatever ended it) and the same transaction is still the
- * open one, end it. A drag that closed its own transaction is never touched.
+ * The guard: when a top-level transaction with the "PropertyEditor" session context starts while a widget holds the
+ * cursor (a drag), remember it. Once that capture is gone (the drag is over, whatever ended it) and the same transaction
+ * is still the open one, end it. A drag that closed its own transaction is never touched.
+ *  - Only the property system's own value sets use that context (PropertyHandleImpl.cpp:557, SPropertyEditorNumeric.h:576),
+ *    and on a working drag they close before the mouse-up returns. Transactions meant to stay open past a click, like
+ *    the colour picker's (ColorStructCustomization.cpp:286), use the empty context and are never watched.
+ *  - It is not limited to the Black Eye panel: a docked tab's widgets are not children of its SDockTab (the stack
+ *    holds them, SDockingTabStack.cpp:181, :451), and Black Eye's tab ids differ by code path (Black_Eye_Editor.cpp:92,
+ *    :585), so no widget or tab check finds the panel reliably. The same leak from any other property drag is closed too.
  *
  * BE-NATIVE: open the transaction in the spin box's OnBeginSliderMovement, set values with InteractiveChange |
  * NotTransactable while dragging, and close it in OnEndSliderMovement and on capture loss, as Epic's own numeric
@@ -37,10 +43,13 @@
 static TAutoConsoleVariable<bool> CVarSliderUndoGuard(
 	TEXT("BlackEyeCustom.SliderUndoGuard"),
 	true,
-	TEXT("Close an undo transaction a Black Eye panel slider drag left open (it locks Undo until a level reload)."));
+	TEXT("Close a property-editor undo transaction a slider drag left open, e.g. in the Black Eye panel (it locks Undo until a level reload)."));
 
 namespace
 {
+	// The session context the property system opens its value-set transactions with (PropertyHandleImpl.cpp:557).
+	const FString PropertyEditorContext(TEXT("PropertyEditor"));
+
 	// More than this many nested opens on one leaked transaction means something else is going on: stop and say so.
 	constexpr int32 MaxEndsPerLeak = 256;
 
@@ -67,19 +76,6 @@ namespace
 		return User.IsValid() ? User->GetCursorCaptor() : nullptr;
 	}
 
-	bool IsInsideBlackEyePanel(const TSharedPtr<SWidget>& Widget)
-	{
-		int32 Depth = 0;
-		for (TSharedPtr<SWidget> It = Widget; It.IsValid() && Depth < 128; It = It->GetParentWidget(), ++Depth)
-		{
-			if (It->GetTypeAsString() == BlackEyeContract::PanelWidgetType)
-			{
-				return true;
-			}
-		}
-		return false;
-	}
-
 	bool IsWatchedStillOpen()
 	{
 		return GWatch.IsSet() && GEditor && GEditor->Trans && GEditor->Trans->IsActive() && GUndo
@@ -92,9 +88,11 @@ namespace
 		{
 			// Started fires only for a top-level Begin (TransBuffer.h:76, :134), so this is never a nested one.
 			const TSharedPtr<SWidget> Captor = GetCursorCaptor();
-			if (CVarSliderUndoGuard.GetValueOnGameThread() && Captor.IsValid() && IsInsideBlackEyePanel(Captor))
+			if (CVarSliderUndoGuard.GetValueOnGameThread() && Captor.IsValid() && Context.Context == PropertyEditorContext)
 			{
 				GWatch = FWatch{ Context.TransactionId, Captor, Context.Title.ToString() };
+				UE_LOG(LogBlackEyeCustom, Verbose, TEXT("[BlackEyeCustom] slider undo guard: watching '%s' (drag by %s)"),
+				       *GWatch->Title, *Captor->GetTypeAsString());
 			}
 			else
 			{
@@ -147,7 +145,7 @@ namespace
 		else
 		{
 			UE_LOG(LogBlackEyeCustom, Log,
-			       TEXT("[BlackEyeCustom] slider undo guard: closed '%s', left open by a Black Eye panel drag (%d level%s)."),
+			       TEXT("[BlackEyeCustom] slider undo guard: closed '%s', left open by a slider drag (%d level%s)."),
 			       *Title, Ends, Ends == 1 ? TEXT("") : TEXT("s"));
 		}
 		GWatch.Reset();
