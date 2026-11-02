@@ -8,7 +8,7 @@ the bug, why it happens, the guard, the native fix, how to verify. Citations are
 
 | Fix | Status | Off switch |
 |---|---|---|
-| [Slider undo guard](#slider-undo-guard) | v2 built 2026-11-02, not yet run (v1 missed the leak) | `BlackEyeCustom.SliderUndoGuard 0` |
+| [Slider undo guard](#slider-undo-guard) | v2 measured 2026-11-02: works (v1 missed the leak) | `BlackEyeCustom.SliderUndoGuard 0` |
 
 ## Slider undo guard
 
@@ -39,7 +39,7 @@ Epic's own numeric editor avoids both: it opens the transaction itself in `OnBeg
 `InteractiveChange | NotTransactable` while dragging, and closes it in `OnEndSliderMovement`
 (`SPropertyEditorNumeric.h:569-598`).
 
-### 3. The guard (status: v1 built and installed 2026-11-02, missed the leak; v2 built 2026-11-02, not yet run)
+### 3. The guard (status: v2 measured 2026-11-02; v1 missed the leak)
 
 `Private/GeneralBugfixes/BlackEyeSliderUndoGuard.cpp`:
 
@@ -55,6 +55,12 @@ it (`PropertyHandleImpl.cpp:557`, `SPropertyEditorNumeric.h:576`), and on a work
 mouse-up returns. Transactions that are meant to stay open past a click, such as the colour picker's
 (`ColorStructCustomization.cpp:286`) or the vector sliders' (`MathStructCustomizations.cpp:747`), use the empty
 context, so they are never watched. The same leak from any other property drag is closed too.
+
+**v2 measured 2026-11-02** on a production Black Eye camera, dragging Subject Screen Position X in the panel: the log
+shows `watching 'Edit X' (drag by SSpinBox<NumericType>)`, then `closed 'Edit X', left open by a slider drag (6 levels)`
+a second later, and Undo stayed available. One drag had left the transaction **6 levels** deep. That fits §2.2: each
+handle the panel recreates mid-drag starts with no drag in progress, so its next interactive `SetValue` opens one more
+nested level.
 
 **v1 missed the leak (measured 2026-11-02).** It only watched drags inside the Black Eye panel and found the panel by
 walking up from the slider to `SBlackEyeTab`. A docked tab's widgets are not children of its `SDockTab`, though: the
