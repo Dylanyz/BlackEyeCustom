@@ -4,7 +4,7 @@
 #pragma once
 
 /**
- * Slider undo guard (docs/slider-undo-guard/DESIGN.md).
+ * Slider undo guard, part of General Bugfixes (docs/general-bugfixes/DESIGN.md § Slider undo guard).
  *
  * A drag on a spin box in the Black Eye panel can leave its "Edit <field>" undo transaction open for good, which
  * locks Undo/Redo ("Can't undo while 'Edit X' is in progress") until the level is reloaded. The guard watches each

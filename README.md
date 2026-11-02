@@ -15,12 +15,12 @@ own way inside Black Eye. It is an extension, not a fork: no Black Eye code is c
 |---|---|---|---|
 | **[Black Eye Bake](#black-eye-bake)** | Records Black Eye cameras into plain keyed "twin" cameras, so an edit plays and renders the same way every time, with no camera jolting into frame at the cuts. | Sequencer toolbar **Bake Edit**; a camera's right-click menu; Content Browser | [docs/fast-bake/DESIGN.md](docs/fast-bake/DESIGN.md) |
 | **[Black Eye Setup](#black-eye-setup)** | Three switches (Follow, LookAt, Focus) that set a Black Eye camera *and* its Sequencer tracks, so it works like a normal camera when a switch is off and nothing fights it. | Sequencer toolbar **Black Eye Setup** | [docs/blackeye-setup/DESIGN.md](docs/blackeye-setup/DESIGN.md) |
-| **Slider undo guard** | Closes the undo transaction a Black Eye panel slider drag can leave open ("Can't undo while 'Edit X' is in progress"), so Undo keeps working. | Always on; `BlackEyeCustom.SliderUndoGuard 0` turns it off | [docs/slider-undo-guard/DESIGN.md](docs/slider-undo-guard/DESIGN.md) |
+| **General Bugfixes** | Small guards for Black Eye bugs. Now: the **slider undo guard**, which closes the undo transaction a Black Eye panel slider drag can leave open ("Can't undo while 'Edit X' is in progress"), so Undo keeps working. | Always on; each fix has its own off switch (`BlackEyeCustom.SliderUndoGuard 0`) | [docs/general-bugfixes/DESIGN.md](docs/general-bugfixes/DESIGN.md) |
 
 ![The two buttons on the Sequencer toolbar: Bake Edit and Black Eye Setup](docs/images/sequencer-toolbar.png)
 
-Both live in one editor module (`BlackEyeCustomEditor`), each in its own folder under `Source/.../Private/`
-(`FastBake/`, `BlackEyeSetup/`). In the code, console and menus Black Eye Bake is called **Fast Bake**.
+All three live in one editor module (`BlackEyeCustomEditor`), each in its own folder under `Source/.../Private/`
+(`FastBake/`, `BlackEyeSetup/`, `GeneralBugfixes/`). In the code, console and menus Black Eye Bake is called **Fast Bake**.
 
 ---
 

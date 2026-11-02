@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Dylan Gitalis. Source-available under CPAL-1.0 with the Commons Clause; see LICENSE.
 // SPDX-License-Identifier: CPAL-1.0 AND LicenseRef-Commons-Clause-1.0
 
-#include "SliderUndoGuard/BlackEyeSliderUndoGuard.h"
+#include "GeneralBugfixes/BlackEyeSliderUndoGuard.h"
 
 #include "BlackEyeContract.h"
 #include "Editor.h"
@@ -14,7 +14,7 @@
 #include "Widgets/SWidget.h"
 
 /**
- * Why a Black Eye panel drag leaks its transaction (Black Eye 2.0.7, UE 5.8.2; DESIGN §2 has the full trail):
+ * Why a Black Eye panel drag leaks its transaction (Black Eye 2.0.7, UE 5.8.2; DESIGN § Slider undo guard has the full trail):
  *  - The panel's spin boxes open no transaction of their own on drag start (SHorizontalSSplitterSSpinbox.cpp:92-109).
  *    The first interactive SetValue makes the property system open one, titled "Edit <field>" (PropertyHandleImpl.cpp:557),
  *    and only a later SetValue with bFinished through the same handle closes it, because whether a drag is in progress

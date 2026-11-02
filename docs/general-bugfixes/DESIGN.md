@@ -1,10 +1,18 @@
 <!-- Copyright (c) 2026 Dylan Gitalis. Source-available under CPAL-1.0 with the Commons Clause; see LICENSE.
      SPDX-License-Identifier: CPAL-1.0 AND LicenseRef-Commons-Clause-1.0 -->
-# Slider undo guard
+# General Bugfixes
 
-Citations are pinned to Black Eye 2.0.7 and UE 5.8.2.
+Small fixes for Black Eye bugs that don't belong to Bake or Setup. Each one is a guard that only acts on the bug's
+exact signature, so it goes quiet once Black Eye fixes the bug. Each fix gets one section below with the same shape:
+the bug, why it happens, the guard, the native fix, how to verify. Citations are pinned to Black Eye 2.0.7 and UE 5.8.2.
 
-## 1. The bug (status: measured)
+| Fix | Status | Off switch |
+|---|---|---|
+| [Slider undo guard](#slider-undo-guard) | built 2026-11-02, not yet run | `BlackEyeCustom.SliderUndoGuard 0` |
+
+## Slider undo guard
+
+### 1. The bug (status: measured)
 
 Dragging a spin box in the Black Eye panel (seen on LookAt **Subject Screen Position X**) can leave its undo
 transaction open. Edit ▸ Undo then reads *"Can't undo while 'Edit X' is in progress"* and stays greyed out until the
@@ -14,7 +22,7 @@ Measured 2026-11-02: the open count, read by calling `EndTransaction` until it r
 time and **17** the second time in the same session. Each bad drag adds one level, because every later edit nests
 inside the open one.
 
-## 2. Why (status: from source, not caught live)
+### 2. Why (status: from source, not caught live)
 
 1. The panel's spin boxes (`SHorizontalSSplitterSSpinbox.cpp:92-142`, `SHorizontalSSplitterSSpinBoxFVector.cpp:90-125`)
    open no transaction on drag start. The first `SetValue(…, InteractiveChange)` makes the property system open one
@@ -31,9 +39,9 @@ Epic's own numeric editor avoids both: it opens the transaction itself in `OnBeg
 `InteractiveChange | NotTransactable` while dragging, and closes it in `OnEndSliderMovement`
 (`SPropertyEditorNumeric.h:569-598`).
 
-## 3. The guard (status: built 2026-11-02, not yet run)
+### 3. The guard (status: built 2026-11-02, not yet run)
 
-`Private/SliderUndoGuard/BlackEyeSliderUndoGuard.cpp`:
+`Private/GeneralBugfixes/BlackEyeSliderUndoGuard.cpp`:
 
 - On `TransactionStarted` (top-level only, `TransBuffer.h:76`, `:134`), if the cursor captor is a widget inside the Black Eye
   panel (`BlackEyeContract::PanelWidgetType`, an ancestor walk), remember the transaction id and the captor.
@@ -45,14 +53,14 @@ Epic's own numeric editor avoids both: it opens the transaction itself in `OnBeg
 Rejected: a hotkey or console command that ends every open transaction. It would also close legitimate ones, and you
 would still lose undo until you noticed.
 
-## 4. Native fix for Black Eye (BE-NATIVE)
+### 4. Native fix for Black Eye (BE-NATIVE)
 
 In the panel spin boxes, do what `SPropertyEditorNumeric` does: `GEditor->BeginTransaction` in `OnBeginSliderMovement`,
 `InteractiveChange | NotTransactable` in `OnValueChanged`, a finished `SetValue` plus `EndTransaction` in
 `OnEndSliderMovement`, and also end the transaction if the widget loses capture or is destroyed during a drag. Then
 handle swaps no longer matter, and this guard goes quiet.
 
-## 5. To verify
+### 5. To verify
 
 1. Install, then run `BlackEyeCustom.SelfTest`; check 8 must be `ok`.
 2. Drag Subject Screen Position X in the panel repeatedly, including while selecting another camera. Edit ▸ Undo must

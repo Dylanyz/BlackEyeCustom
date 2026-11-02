@@ -6,7 +6,7 @@
 #include "BlackEyeContract.h"
 #include "FastBake/BlackEyeFastBakeInternal.h"
 #include "BlackEyeSetup/BlackEyeSetupInternal.h"
-#include "SliderUndoGuard/BlackEyeSliderUndoGuard.h"
+#include "GeneralBugfixes/BlackEyeSliderUndoGuard.h"
 
 /**
  * `BlackEyeCustom.SelfTest` in the console checks every Black Eye symbol this plugin reaches by name
