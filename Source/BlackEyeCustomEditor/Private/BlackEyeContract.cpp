@@ -6,6 +6,7 @@
 #include "CineCameraActor.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Interfaces/IPluginManager.h"
+#include "Modules/ModuleManager.h"
 #include "UObject/Class.h"
 #include "UObject/UnrealType.h"
 
@@ -374,6 +375,10 @@ bool BlackEyeContract::RunSelfTest()
 	const UEnum* PivotEnum = FindObject<UEnum>(FTopLevelAssetPath(BlackEyeScriptPackage, TEXT("EFollowMountPivotMode"))); // BlackEyeTypes.h:24
 	bAll &= Check(7, TEXT("enum value"), PivotEnum && PivotEnum->GetValueByNameString(TEXT("FMPM_Manual")) != INDEX_NONE,
 	              TEXT("EFollowMountPivotMode::FMPM_Manual"));
+
+	// 8. Slider undo guard: the panel's module is loaded (its widget type name can't be checked by reflection).
+	bAll &= Check(8, TEXT("panel module"), FModuleManager::Get().IsModuleLoaded(PanelModuleName),
+	              FString::Printf(TEXT("%s (widget %s)"), PanelModuleName, PanelWidgetType));
 
 	UE_LOG(LogBlackEyeCustom, Display, TEXT("[BlackEyeCustom] selftest %s"), bAll ? TEXT("PASSED") : TEXT("FAILED"));
 	return bAll;

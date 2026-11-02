@@ -102,6 +102,14 @@ namespace BlackEyeContract
 	BLACKEYECUSTOMEDITOR_API bool GetEnumName(const UObject* Object, FName Prop, FString& OutValueName);
 	BLACKEYECUSTOMEDITOR_API bool SetEnumByName(UObject* Object, FName Prop, const FString& ValueName);
 
+	/**
+	 * Slate type name of the Black Eye panel tab (SBlackEyeTab.h:49), matched with SWidget::GetTypeAsString by the slider
+	 * undo guard, and the module that owns it. A Slate type has no reflection, so the self-test can only check the module.
+	 * BE-NATIVE: not needed; the fix belongs in the panel's own spin boxes.
+	 */
+	inline constexpr const TCHAR* PanelWidgetType = TEXT("SBlackEyeTab");
+	inline constexpr const TCHAR* PanelModuleName = TEXT("Black_Eye_Editor");
+
 	/** VersionName from Black_Eye.uplugin; empty when the plugin is not enabled. */
 	BLACKEYECUSTOMEDITOR_API FString GetInstalledVersion();
 

@@ -9,12 +9,13 @@ Each extension solves a problem we hit in production, and is written to be read:
 rests on and the traps found along the way are all in the repo, so the Black Eye developers can rebuild it their
 own way inside Black Eye. It is an extension, not a fork: no Black Eye code is copied or patched.
 
-## Two modules
+## Extensions
 
 | Module | What it's for | Where you find it | Design |
 |---|---|---|---|
 | **[Black Eye Bake](#black-eye-bake)** | Records Black Eye cameras into plain keyed "twin" cameras, so an edit plays and renders the same way every time, with no camera jolting into frame at the cuts. | Sequencer toolbar **Bake Edit**; a camera's right-click menu; Content Browser | [docs/fast-bake/DESIGN.md](docs/fast-bake/DESIGN.md) |
 | **[Black Eye Setup](#black-eye-setup)** | Three switches (Follow, LookAt, Focus) that set a Black Eye camera *and* its Sequencer tracks, so it works like a normal camera when a switch is off and nothing fights it. | Sequencer toolbar **Black Eye Setup** | [docs/blackeye-setup/DESIGN.md](docs/blackeye-setup/DESIGN.md) |
+| **Slider undo guard** | Closes the undo transaction a Black Eye panel slider drag can leave open ("Can't undo while 'Edit X' is in progress"), so Undo keeps working. | Always on; `BlackEyeCustom.SliderUndoGuard 0` turns it off | [docs/slider-undo-guard/DESIGN.md](docs/slider-undo-guard/DESIGN.md) |
 
 ![The two buttons on the Sequencer toolbar: Bake Edit and Black Eye Setup](docs/images/sequencer-toolbar.png)
 
